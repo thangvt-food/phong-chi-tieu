@@ -1,0 +1,32 @@
+{
+  "name": "phong-chi-tieu",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "pages:dev": "wrangler pages dev dist --d1=DB=b486dd23-5578-4444-8dc3-840d32bea414",
+    "dev:server": "wrangler pages dev dist --d1=DB=b486dd23-5578-4444-8dc3-840d32bea414 --port 8788",
+    "dev:full": "VITE_API_TARGET=http://localhost:8788 concurrently -n web,api -c green,magenta \"vite\" \"npm run dev:server\"",
+    "db:pull": "wrangler d1 export phong_chi_tieu_db --remote --output=.wrangler/prod-export.sql && wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS settings;\" && wrangler d1 execute phong_chi_tieu_db --local --file=.wrangler/prod-export.sql"
+  },
+  "dependencies": {
+    "canvas-confetti": "^1.9.3",
+    "lucide-react": "^0.453.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^10.0.6",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "vite": "^5.4.10",
+    "wrangler": "^3.84.1"
+  }
+}

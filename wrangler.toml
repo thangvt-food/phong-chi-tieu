@@ -1,0 +1,8 @@
+name = "phong-chi-tieu"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "./dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "phong_chi_tieu_db"
+database_id = "b486dd23-5578-4444-8dc3-840d32bea414"
