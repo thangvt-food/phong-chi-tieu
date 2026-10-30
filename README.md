@@ -17,22 +17,35 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
      - Số tài khoản người thu tiền
      - Tên ngân hàng thụ hưởng
      - Số tiền chính xác cần đóng
-     - Cú pháp nội dung chuyển khoản (VD: `TIEN PHONG AN T10`)
+     - Cú pháp nội dung chuyển khoản (VD: `TIEN PHONG 2A AN T10`) — mã phòng đứng
+       trước tên người để một tài khoản nhận cho nhiều phòng vẫn phân biệt được sao kê.
    - Hỗ trợ nút sao chép 1 chạm cho STK, Số tiền, Nội dung.
 
-3. **Bảo mật Admin bằng mã Hash (Không cần đăng ký/đăng nhập phức tạp)**:
-   - Thành viên chỉ xem dữ liệu và quét mã QR.
-   - Người thu tiền (Admin) bấm nút **Admin** và nhập mã PIN.
-   - Hệ thống tự động băm **SHA-256** và so khớp với mã hash được cấu hình.
-   - Mã PIN mặc định: `123456`
-   - Mã SHA-256 Hash mặc định: `8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92`
-   - Cho phép đổi mã PIN trực tiếp trên giao diện Admin và hiển thị mã hash để bạn copy/hardcode.
+3. **Bảo mật Admin theo từng phòng (không đăng ký/đăng nhập)**:
+   - Mỗi phòng có một mã PIN riêng; hệ thống băm **SHA-256** và so với hash lưu trong DB của phòng đó.
+   - PIN chỉ dùng để lấy "hash mở khoá" lưu trong máy bạn; tab **PIN & Mời người** cho đổi PIN.
+   - `schema.sql` seed hash của `123456` **cho D1 local**. DB thật phải đổi PIN ngay sau khi migrate.
 
-4. **1-Chạm cập nhật trạng thái thanh toán**:
+4. **Vào phòng bằng link mời (hết hạn 15 phút, dùng 1 lần)**:
+   - Admin mở **Cài đặt -> Thành viên -> Link mời**, gửi link cho đúng một người.
+   - Người được mời mở link -> nhận phiên 90 ngày trên thiết bị đó, tự tick "đã nộp" cho
+     phần của mình mà không cần PIN.
+   - Admin thu hồi bất cứ lúc nào (**icon đá người**): request kế tiếp của người đó là 401.
+   - Chỉ mã SHA-256 của token được lưu; DB bị lộ cũng không còn phiên sống.
+
+5. **1-Chạm cập nhật trạng thái thanh toán**:
    - Khi có bạn trong phòng chuyển khoản, Admin bấm toggle đổi trạng thái "Chưa nộp" -> "Đã nộp" (kèm hiệu ứng pháo hoa chúc mừng 🎉).
    - Hỗ trợ **trả góp từng phần**: bấm icon 💰 trên thẻ thành viên để ghi nhận số đã thu mỗi đợt, app tự tính còn thiếu và sinh QR đúng số còn lại.
 
-5. **Hoạt động kép (Dual Mode)**:
+6. **Nhiều phòng trọ độc lập, tự tạo trong app**:
+   - Một D1 duy nhất, mọi bảng có `room_id`; phòng là một sổ chi tiêu riêng
+     (thành viên, kỳ, khoản chi, PIN, sao kê riêng).
+   - URL theo phòng: `https://.../?p=phong-2a`. Thiếu `?p` = phòng `phong-2a` (URL cũ không hỏng).
+   - Bấm tên phòng trên header -> **Tạo phòng mới** (mã phòng sinh từ tên, không dấu) hoặc
+     dán link mời để vào phòng người khác.
+   - Hai phòng cùng tạo kỳ `2026-11` không ghi đè nhau (PK ghép `(room_id, period_id, member_id)`).
+
+7. **Hoạt động kép (Dual Mode)**:
    - Chạy offline/local: Tự động lưu vào `LocalStorage`, mở web là chạy ngay không cần cài đặt database.
    - Deploy Cloudflare: Tự động kết nối với **Cloudflare D1 SQL Database** qua **Cloudflare Pages Functions** (`/api/*`).
 
@@ -66,6 +79,9 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    | `npm run dev:server` | Chỉ chạy server API local (:8788, D1 local) |
    | `npm run dev:full` | Web local + server API local cùng lúc |
    | `npm run db:pull` | Copy dữ liệu production về D1 local |
+   | `npm run db:schema:local` | Dựng lại D1 local từ `schema.sql` (bản đã có `room_id`) |
+   | `npm run db:migrate:local` | Chạy `migrations/002_multitenancy.sql` trên D1 local |
+   | `bash scripts/smoke.sh` | 48 assertion đa phòng qua HTTP, chạy trên D1 local (cần `dev:server`) |
 
 ---
 
@@ -130,8 +146,8 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
 
 ## 🔐 Cấu Trúc Mã Hash Admin
 
-- Thuật toán băm: **SHA-256**
+- Thuật toán băm: **SHA-256**, lưu theo phòng ở `settings(room_id, 'admin_pin_hash')`.
 - Nếu muốn hardcode mã PIN của riêng bạn (ví dụ PIN là `999888`):
-  1. Vào web -> bấm **Admin** -> nhập `123456`
-  2. Mở tab **Mã Hash / PIN** -> nhập mã mới của bạn -> copy mã SHA-256 hash hiển thị ở dưới.
+  1. Vào web -> bấm **Cài đặt** -> nhập PIN hiện tại của phòng đó
+  2. Mở tab **PIN & Mời người** -> nhập mã mới của bạn -> lưu.
   3. Bạn có thể dán mã hash này vào dòng `admin_pin_hash` trong [schema.sql](file:///data/Projects/2a/schema.sql) hoặc file cấu hình Cloudflare D1.

@@ -3,7 +3,7 @@ import { X, Lock, Key, AlertCircle, CheckCircle2, Hash } from 'lucide-react';
 import { sha256 } from '../services/crypto';
 import { verifyAdminPin } from '../services/api';
 
-export default function AdminModal({ isOpen, onClose, onSuccess }) {
+export default function AdminModal({ isOpen, onClose, onSuccess, roomId, roomName }) {
   // NOTE: hook phải chạy trước mọi `return` (Rules of Hooks).
   const [pin, setPin] = useState('');
   const [currentHash, setCurrentHash] = useState('');
@@ -34,7 +34,7 @@ export default function AdminModal({ isOpen, onClose, onSuccess }) {
     setError('');
 
     try {
-      const result = await verifyAdminPin(pin);
+      const result = await verifyAdminPin(roomId, pin);
       if (result.valid) {
         onSuccess(result.hash);
         onClose();
@@ -86,7 +86,7 @@ export default function AdminModal({ isOpen, onClose, onSuccess }) {
                   setPin(e.target.value);
                   setError('');
                 }}
-                placeholder="Nhập mã PIN (Mặc định: 123456)"
+                placeholder={`PIN của ${roomName || roomId || "phòng"}`}
                 autoFocus
                 className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all pr-10"
               />
@@ -114,11 +114,12 @@ export default function AdminModal({ isOpen, onClose, onSuccess }) {
           )}
 
           <div className="p-2.5 rounded-xl bg-blue-50/70 border border-blue-100 text-[11px] text-blue-800 space-y-1">
-            <p className="font-semibold flex items-center gap-1">
-              💡 Gợi ý mã PIN mặc định: <span className="font-mono text-indigo-700">123456</span>
+            <p className="font-semibold">
+              Mỗi phòng một PIN riêng — bạn đang mở khoá{' '}
+              <span className="font-mono text-indigo-700">{roomName || roomId}</span>.
             </p>
             <p className="text-blue-600">
-              Bạn có thể đổi mã PIN hoặc cập nhật chuỗi hash trong mục Cài đặt bất kỳ lúc nào.
+              Sai PIN thì chỉ phòng này bị chặn, không ảnh hưởng phòng khác. Đổi PIN ở Cài đặt &rsaquo; Bảo mật.
             </p>
           </div>
 

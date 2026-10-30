@@ -10,7 +10,7 @@ import {
   Download,
   Loader2,
 } from 'lucide-react';
-import { formatMoney, generateVietQrUrl } from '../services/api';
+import { formatMoney, generateVietQrUrl, defaultTransferCode } from '../services/api';
 import { VIETNAM_BANKS } from '../constants/banks';
 
 export default function VietQrModal({
@@ -19,6 +19,7 @@ export default function VietQrModal({
   calculation,
   settings = {},
   periodTitle = '',
+  roomId = '',
 }) {
   // NOTE: hook phải chạy trước mọi `return` (Rules of Hooks).
   const [copiedField, setCopiedField] = useState(null);
@@ -44,9 +45,14 @@ export default function VietQrModal({
 
   const memberIdentifier = member.nickname || member.name;
   const cleanPrefix = removeAccents(settings.transfer_prefix || 'TIEN PHONG');
+  // Mã phòng đứng trước tên người: nhiều phòng dùng chung một STK thì sao kê ngân
+  // hàng chỉ phân biệt được nhờ nó.
+  const cleanCode = removeAccents(settings.transfer_code || defaultTransferCode(roomId));
   const cleanMember = removeAccents(memberIdentifier);
   const cleanPeriod = removeAccents(periodTitle.replace(/Tháng\s*/i, 'T'));
-  const transferContent = `${cleanPrefix} ${cleanMember} ${cleanPeriod}`.trim();
+  const transferContent = `${cleanPrefix} ${cleanCode} ${cleanMember} ${cleanPeriod}`
+    .replace(/\s+/g, ' ')
+    .trim();
 
   // Thu đúng số còn thiếu (hỗ trợ trả góp từng phần)
   const amountDue = remaining !== undefined && remaining !== null ? remaining : totalAmount;

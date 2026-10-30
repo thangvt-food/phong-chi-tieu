@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Plus,
@@ -11,6 +11,10 @@ import {
   CheckCircle2,
   Copy,
   Check,
+  Link2,
+  LogOut,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 import { VIETNAM_BANKS } from '../constants/banks';
 import {
@@ -20,19 +24,23 @@ import {
   deletePeriod,
   updateSettings,
   setStoredAdminHash,
+  defaultTransferCode,
+  createInvite,
+  revokeMemberSession,
 } from '../services/api';
 import { sha256 } from '../services/crypto';
 
 export default function AdminDashboard({
   isOpen,
   onClose,
+  roomId,
   data,
   adminHash,
   onDataRefresh,
 }) {
   // NOTE: hook phải chạy trước mọi `return` (Rules of Hooks).
   const [activeTab, setActiveTab] = useState('members'); // 'members', 'settings', 'security', 'periods'
-  const [copiedHash, setCopiedHash] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   // Form states for Member
   const [memberForm, setMemberForm] = useState({
@@ -54,12 +62,31 @@ export default function AdminDashboard({
     account_no: data.settings?.account_no || '',
     account_name: data.settings?.account_name || '',
     transfer_prefix: data.settings?.transfer_prefix || 'TIEN PHONG',
+    transfer_code: data.settings?.transfer_code || defaultTransferCode(roomId),
   });
+
+  // Đổi phòng / tải lại dữ liệu thì form phải theo phòng, không giữ số của phòng trước.
+  useEffect(() => {
+    const s = data.settings || {};
+    setSettingsForm({
+      room_name: s.room_name || '',
+      bank_id: s.bank_id || 'MB',
+      account_no: s.account_no || '',
+      account_name: s.account_name || '',
+      transfer_prefix: s.transfer_prefix || 'TIEN PHONG',
+      transfer_code: s.transfer_code || defaultTransferCode(roomId),
+    });
+  }, [roomId, data.settings]);
 
   // Security Form
   const [newPin, setNewPin] = useState('');
   const [newPinHash, setNewPinHash] = useState('');
   const [securitySuccess, setSecuritySuccess] = useState('');
+
+  // Invite link: { member_id, memberName, link, expires_at }
+  const [invite, setInvite] = useState(null);
+  const [inviteBusy, setInviteBusy] = useState('');
+  const [inviteError, setInviteError] = useState('');
 
   if (!isOpen) return null;
 
@@ -81,6 +108,7 @@ export default function AdminDashboard({
     }
 
     await saveMember(
+      roomId,
       {
         name: memberForm.name,
         nickname: memberForm.nickname,
@@ -96,9 +124,44 @@ export default function AdminDashboard({
 
   const handleDeleteMember = async (id) => {
     if (confirm('Bạn có chắc muốn xóa thành viên này khỏi phòng?')) {
-      await deleteMember(id, adminHash);
+      await deleteMember(roomId, id, adminHash);
+      if (invite?.member_id === id) setInvite(null);
       onDataRefresh();
     }
+  };
+
+  // Link mời gắn với ĐÚNG một thành viên: ai bấm vào sẽ được nhận là người đó.
+  const handleCreateInvite = async (member) => {
+    setInviteBusy(member.id);
+    setInviteError('');
+    const result = await createInvite(roomId, member.id, { ttlMin: 15, uses: 1 }, adminHash);
+    setInviteBusy('');
+    if (!result.success) {
+      setInvite(null);
+      setInviteError(
+        result.unauthorized
+          ? 'Cần nhập lại PIN phòng này để tạo link.'
+          : result.error || 'Không tạo được link mời (cần chế độ online).'
+      );
+      return;
+    }
+    const base = window.location.origin + window.location.pathname;
+    setInvite({
+      member_id: member.id,
+      memberName: member.nickname || member.name,
+      link: `${base}?j=${result.token}`,
+      expires_at: result.expires_at,
+    });
+  };
+
+  const handleRevoke = async (member) => {
+    if (!confirm(`Thu hồi phiên của ${member.name}? Bạn ấy sẽ cần link mời mới.`)) return;
+    const result = await revokeMemberSession(roomId, member.id, adminHash);
+    if (!result.success) {
+      alert(result.error || 'Không thu hồi được.');
+      return;
+    }
+    alert(result.revoked > 0 ? `Đã thu hồi ${result.revoked} phiên.` : 'Thành viên đó chưa có phiên nào.');
   };
 
   const handleSavePeriod = async (e) => {
@@ -110,6 +173,7 @@ export default function AdminDashboard({
 
     const id = 'period_' + Date.now();
     await savePeriod(
+      roomId,
       {
         id,
         title: periodForm.title,
@@ -125,7 +189,7 @@ export default function AdminDashboard({
 
   const handleSaveSettings = async (e) => {
     e.preventDefault();
-    await updateSettings(settingsForm, adminHash);
+    await updateSettings(roomId, settingsForm, adminHash);
     onDataRefresh();
     alert('Đã cập nhật thông tin phòng & tài khoản VietQR thành công!');
   };
@@ -134,8 +198,8 @@ export default function AdminDashboard({
     e.preventDefault();
     if (!newPin || !newPinHash) return;
 
-    await updateSettings({ admin_pin_hash: newPinHash }, adminHash);
-    setStoredAdminHash(newPinHash);
+    await updateSettings(roomId, { admin_pin_hash: newPinHash }, adminHash);
+    setStoredAdminHash(roomId, newPinHash);
     setSecuritySuccess('Đã cập nhật mã PIN & Hash mới thành công!');
     setNewPin('');
     setTimeout(() => setSecuritySuccess(''), 4000);
@@ -175,7 +239,7 @@ export default function AdminDashboard({
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Users className="w-3.5 h-3.5" /> Thành viên ({data.members.length})
+            <Users className="w-3.5 h-3.5" /> Thành viên ({(data.members || []).length})
           </button>
 
           <button
@@ -197,7 +261,7 @@ export default function AdminDashboard({
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Key className="w-3.5 h-3.5" /> Mã Hash / PIN
+            <Key className="w-3.5 h-3.5" /> PIN & Mời người
           </button>
 
           <button
@@ -276,6 +340,58 @@ export default function AdminDashboard({
                 </div>
               </form>
 
+              {/* Invite link đang mở */}
+              {(invite || inviteError) && (
+                <div className="p-3.5 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-2">
+                  {inviteError ? (
+                    <div className="flex items-start gap-2 text-rose-700 text-xs">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{inviteError}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-indigo-900">
+                          Link mời cho {invite.memberName}
+                        </span>
+                        <span className="text-[10px] text-indigo-700">
+                          hết hạn {new Date(invite.expires_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })} · dùng 1 lần
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          readOnly
+                          value={invite.link}
+                          onFocus={(e) => e.target.select()}
+                          className="flex-1 px-2.5 py-2 bg-white border border-indigo-200 rounded-lg text-[11px] font-mono text-slate-700 outline-none"
+                        />
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(invite.link);
+                            setCopiedLink(true);
+                            setTimeout(() => setCopiedLink(false), 2000);
+                          }}
+                          className="p-2 text-slate-500 hover:text-indigo-600 bg-white border border-indigo-200 rounded-lg shrink-0"
+                          title="Sao chép link mời"
+                        >
+                          {copiedLink ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                        </button>
+                        <button
+                          onClick={() => handleCreateInvite({ id: invite.member_id, name: invite.memberName })}
+                          className="px-2.5 py-2 text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg shrink-0 hover:bg-indigo-100"
+                          title="Hủy link cũ và tạo link mới"
+                        >
+                          Tạo lại
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-indigo-700">
+                        Gửi link này cho đúng bạn đó qua Zalo/SMS. Hết 15 phút thì bấm "Tạo lại".
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+
               {/* Members List */}
               <div className="space-y-2">
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
@@ -284,21 +400,43 @@ export default function AdminDashboard({
                 {data.members.map((m) => (
                   <div
                     key={m.id}
-                    className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between"
+                    className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between gap-2"
                   >
-                    <div>
+                    <div className="min-w-0">
                       <span className="font-semibold text-xs text-slate-800">
                         {m.name} {m.nickname && `(${m.nickname})`}
                       </span>
                       {m.phone && <span className="text-[11px] text-slate-400 block">{m.phone}</span>}
                     </div>
-                    <button
-                      onClick={() => handleDeleteMember(m.id)}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
-                      title="Xóa thành viên"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => handleCreateInvite(m)}
+                        disabled={inviteBusy === m.id}
+                        className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                        title="Tạo link mời cho thành viên này"
+                      >
+                        {inviteBusy === m.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Link2 className="w-3.5 h-3.5" />
+                        )}
+                        Link mời
+                      </button>
+                      <button
+                        onClick={() => handleRevoke(m)}
+                        className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
+                        title="Thu hồi phiên (đá khỏi phòng)"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteMember(m.id)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                        title="Xóa thành viên"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -390,6 +528,27 @@ export default function AdminDashboard({
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
                   />
                 </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Mã phòng trong nội dung chuyển khoản:
+                  </label>
+                  <input
+                    type="text"
+                    value={settingsForm.transfer_code}
+                    onChange={(e) =>
+                      setSettingsForm({ ...settingsForm, transfer_code: e.target.value.toUpperCase() })
+                    }
+                    placeholder={defaultTransferCode(roomId)}
+                    maxLength={6}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono uppercase"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Nội dung sẽ là <span className="font-mono text-slate-700">TIEN PHONG {settingsForm.transfer_code} {`<tên bạn>`} {`<kỳ>`}</span>.
+                    Đứng trước tên người nên không bị ngân hàng cắt mất khi nhiều phòng
+                    cùng nhận vào một số tài khoản.
+                  </p>
+                </div>
               </div>
 
               <div className="flex justify-end pt-2">
@@ -403,33 +562,17 @@ export default function AdminDashboard({
             </form>
           )}
 
-          {/* TAB 3: SECURITY & HASH */}
+          {/* TAB 3: SECURITY */}
           {activeTab === 'security' && (
             <div className="space-y-4">
-              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-1.5">
                 <span className="text-xs font-semibold text-slate-700 block">
-                  Mã SHA-256 Hash đang áp dụng:
+                  PIN của phòng <span className="font-mono text-indigo-700">{roomId}</span>
                 </span>
-                <div className="flex items-center gap-2">
-                  <p className="text-[11px] font-mono text-slate-800 break-all bg-white p-2 rounded-lg border border-slate-200 flex-1 select-all">
-                    {adminHash}
-                  </p>
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(adminHash);
-                      setCopiedHash(true);
-                      setTimeout(() => setCopiedHash(false), 2000);
-                    }}
-                    className="p-2 text-slate-500 hover:text-indigo-600 bg-white border border-slate-200 rounded-lg shrink-0"
-                    title="Sao chép mã hash"
-                  >
-                    {copiedHash ? (
-                      <Check className="w-4 h-4 text-emerald-600" />
-                    ) : (
-                      <Copy className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
+                <p className="text-[11px] text-slate-500">
+                  PIN này chỉ mở khoá Cài đặt của phòng này; phòng khác có PIN riêng. Không ai
+                  nhìn thấy PIN thật — máy chủ chỉ giữ mã SHA-256 của nó.
+                </p>
               </div>
 
               {/* Form to change PIN */}
@@ -535,7 +678,7 @@ export default function AdminDashboard({
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                   Các kỳ hiện có
                 </h4>
-                {data.periods.map((p) => (
+                {(data.periods || []).map((p) => (
                   <div
                     key={p.id}
                     className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between"

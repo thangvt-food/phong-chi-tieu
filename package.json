@@ -7,10 +7,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "pages:dev": "wrangler pages dev dist --d1=DB=b486dd23-5578-4444-8dc3-840d32bea414",
-    "dev:server": "wrangler pages dev dist --d1=DB=b486dd23-5578-4444-8dc3-840d32bea414 --port 8788",
-    "dev:full": "VITE_API_TARGET=http://localhost:8788 concurrently -n web,api -c green,magenta \"vite\" \"npm run dev:server\"",
-    "db:pull": "wrangler d1 export phong_chi_tieu_db --remote --output=.wrangler/prod-export.sql && wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS settings;\" && wrangler d1 execute phong_chi_tieu_db --local --file=.wrangler/prod-export.sql"
+    "pages:dev": "wrangler pages dev dist",
+    "dev:server": "wrangler pages dev dist --port 8788",
+    "dev:full": "concurrently -n web,api -c green,magenta \"vite\" \"npm run dev:server\"",
+    "db:pull": "wrangler d1 export phong_chi_tieu_db --remote --output=.wrangler/prod-export.sql && wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS settings; DROP TABLE IF EXISTS rooms; DROP TABLE IF EXISTS invites; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS schema_meta;\" && wrangler d1 execute phong_chi_tieu_db --local --file=.wrangler/prod-export.sql",
+    "db:migrate:local": "wrangler d1 execute phong_chi_tieu_db --local --file=./migrations/002_multitenancy.sql",
+    "db:schema:local": "wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS settings; DROP TABLE IF EXISTS rooms; DROP TABLE IF EXISTS invites; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS schema_meta;\" && wrangler d1 execute phong_chi_tieu_db --local --file=./schema.sql"
   },
   "dependencies": {
     "canvas-confetti": "^1.9.3",
