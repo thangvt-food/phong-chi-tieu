@@ -5,15 +5,14 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 3000,
-    // Proxy các request /api:
-    // - Mặc định sang thẳng Cloudflare Pages Functions & D1 production.
-    // - Khi chạy dev full-stack local (npm run dev:full), trỏ sang server local
-    //   qua biến môi trường VITE_API_TARGET=http://localhost:8788
+    // Proxy các request /api sang server Functions local (npm run dev:server / dev:full).
+    // Muốn dev bắn thẳng lên production, đặt rõ:
+    //   VITE_API_TARGET=https://phong-chi-tieu.pages.dev npm run dev
     proxy: {
       '/api': {
-        target: process.env.VITE_API_TARGET || 'https://phong-chi-tieu.pages.dev',
+        target: process.env.VITE_API_TARGET || 'http://localhost:8788',
         changeOrigin: true,
-        secure: true,
+        secure: false,
       },
     },
   },
