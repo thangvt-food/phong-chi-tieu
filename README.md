@@ -75,13 +75,15 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
 
    | Lệnh | Tác dụng |
    | ---- | -------- |
-   | `npm run dev` | Web local + API production |
+   | `npm run dev` | Web local, `/api` proxy sang server local (:8788) — không còn bắn thẳng production |
+   | `VITE_API_TARGET=https://phong-chi-tieu.pages.dev npm run dev` | Chủ đích cho dev bắn lên production |
    | `npm run dev:server` | Chỉ chạy server API local (:8788, D1 local) |
    | `npm run dev:full` | Web local + server API local cùng lúc |
    | `npm run db:pull` | Copy dữ liệu production về D1 local |
    | `npm run db:schema:local` | Dựng lại D1 local từ `schema.sql` (bản đã có `room_id`) |
    | `npm run db:migrate:local` | Chạy `migrations/002_multitenancy.sql` trên D1 local |
    | `bash scripts/smoke.sh` | 48 assertion đa phòng qua HTTP, chạy trên D1 local (cần `dev:server`) |
+   | `bash scripts/pr6-deploy.sh` | Di cư production (backup → migrate → deploy → verify). Không có `--yes` thì chỉ in lệnh |
 
 ---
 
