@@ -38,6 +38,24 @@ ALTER TABLE invites_v2 RENAME TO invites;
 
 CREATE INDEX IF NOT EXISTS ix_invites_room_member ON invites(room_id, member_id);
 
+-- rooms.owner_member_id được 002 tạo cột nhưng để TRỐNG cho phòng kế thừa (phong-2a),
+-- nên guard "chủ phòng không tự xóa/rời" sẽ là code chết trên đúng phòng đang dùng thật.
+-- Chọn người active có created_at sớm nhất — khớp cách app vẫn hiển thị thứ tự thành viên.
+-- UPDATE có điều kiện IS NULL: chạy lần hai không ghi đè chủ đã giao bằng /api/admin/transfer-owner.
+UPDATE rooms
+   SET owner_member_id = (
+         SELECT id FROM members
+          WHERE members.room_id = rooms.room_id
+            AND members.is_active = 1
+          ORDER BY members.created_at ASC, members.rowid ASC
+          LIMIT 1
+       )
+ WHERE owner_member_id IS NULL
+   AND EXISTS (
+     SELECT 1 FROM members
+      WHERE members.room_id = rooms.room_id AND members.is_active = 1
+   );
+
 -- Cờ version đặt cuối: API chỉ coi schema là sẵn sàng khi đọc được dòng này, và
 -- scripts/pr6-deploy.sh chặn nếu migration chạy xong mà DB chưa đạt TO_VERSION.
 CREATE TABLE IF NOT EXISTS schema_meta (

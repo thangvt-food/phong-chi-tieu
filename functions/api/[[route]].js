@@ -83,6 +83,115 @@ async function readSession(db, request) {
   return { roomId: row.room_id, memberId: row.member_id, role: row.role, token: raw };
 }
 
+// Ba mức quyền của link mời (cột invites.role, migration 003):
+//   viewer  - chỉ xem sổ
+//   member  - xem + tự tick "đã nộp" cho phần của mình (mặc định, = hành vi cũ)
+//   manager - như member + tạo lại link mời + thu hồi phiên; KHÔNG sửa được sổ
+const INVITE_ROLES = ['viewer', 'member', 'manager'];
+const INVITE_PATHS_FOR_MANAGER = ['admin/invites', 'admin/revoke'];
+
+function normalizeRole(role) {
+  return INVITE_ROLES.includes(role) ? role : 'member';
+}
+
+async function getOwnerMemberId(db, roomId) {
+  const row = await db.prepare('SELECT owner_member_id FROM rooms WHERE room_id = ?').bind(roomId).first();
+  return row?.owner_member_id || null;
+}
+
+// "Xóa thành viên" = NGƯNG HOẠT ĐỘNG, không phải xóa dòng. Một sổ cái không được
+// phép viết lại quá khứ: member_shares của người đó là dữ liệu tiền thật, và
+// expenses.split_config vẫn tham chiếu id của họ — xóa cứng làm client tính lại
+// và chia khoản cũ cho những người còn ở (xem src/services/api.js calcExpenseShares).
+// Quyền vào phòng thì mất ngay: mọi phiên thu hồi, mọi link mời bị xóa.
+async function deactivateMember(db, roomId, memberId) {
+  const nowIso = new Date().toISOString();
+  await db.batch([
+    db.prepare('UPDATE members SET is_active = 0 WHERE id = ? AND room_id = ?').bind(memberId, roomId),
+    db.prepare('UPDATE sessions SET revoked_at = ? WHERE room_id = ? AND member_id = ? AND revoked_at IS NULL')
+      .bind(nowIso, roomId, memberId),
+    db.prepare('DELETE FROM invites WHERE room_id = ? AND member_id = ?').bind(roomId, memberId),
+  ]);
+  return nowIso;
+}
+
+// Chặn hai tình huống phòng bị mất chủ / mất người cuối cùng. Trả về message lỗi
+// hoặc null khi được phép. Dùng chung cho DELETE member và POST rooms/leave.
+async function checkRemovable(db, roomId, memberId) {
+  const owner = await getOwnerMemberId(db, roomId);
+  if (memberId && owner && memberId === owner) {
+    return 'Chủ phòng không rời/xóa được khi chưa giao phòng lại cho người khác.';
+  }
+  const active = await db
+    .prepare('SELECT COUNT(*) AS c FROM members WHERE room_id = ? AND is_active = 1')
+    .bind(roomId)
+    .first();
+  const target = await db
+    .prepare('SELECT is_active FROM members WHERE id = ? AND room_id = ?')
+    .bind(memberId, roomId)
+    .first();
+  if (target && target.is_active && (active?.c ?? 0) <= 1) {
+    return 'Phòng cần còn ít nhất một thành viên đang hoạt động.';
+  }
+  return null;
+}
+
+// 11/12 - mint link mời và thu hồi phiên, dùng cho CẢ hai đường credential:
+// chủ phòng (x-admin-hash = PIN) và manager (Bearer session role='manager').
+// Tách khỏi thân handler để hai đường không thể lệch nhau về validate.
+async function mintInvite(env, roomId, body) {
+  const memberId = String(body.member_id || '');
+  const ttlMin = Math.min(1440, Math.max(1, parseInt(body.ttl_min) || INVITE_TTL_MIN_DEFAULT));
+  const uses = Math.min(5, Math.max(1, parseInt(body.uses) || 1));
+  const role = normalizeRole(body.role);
+
+  const member = await env.DB.prepare('SELECT id, name, nickname, is_active FROM members WHERE id = ? AND room_id = ?')
+    .bind(memberId, roomId).first();
+  if (!member) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
+  if (!member.is_active) {
+    return jsonResponse({ error: 'Thành viên đã ngưng hoạt động, hãy thêm lại rồi mới mời.', room_id: roomId }, 409);
+  }
+
+  const expiresAt = isoAfter(ttlMin * 60 * 1000);
+  // Tạo link mới = vô hiệu hoá link cũ còn sót của đúng thành viên đó.
+  const token = await newToken();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM invites WHERE room_id = ? AND member_id = ?').bind(roomId, memberId),
+    env.DB.prepare(
+      'INSERT INTO invites (token_hash, room_id, member_id, role, expires_at, uses_left) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(await sha256Hex(token), roomId, memberId, role, expiresAt, uses),
+  ]);
+  return jsonResponse({
+    success: true,
+    room_id: roomId,
+    member_id: memberId,
+    role,
+    token,
+    ttl_min: ttlMin,
+    uses_left: uses,
+    expires_at: expiresAt,
+  });
+}
+
+async function revokeMemberSessions(env, roomId, body) {
+  const memberId = String(body.member_id || '');
+  const res = await env.DB.prepare(
+    'UPDATE sessions SET revoked_at = ? WHERE room_id = ? AND member_id = ? AND revoked_at IS NULL'
+  ).bind(new Date().toISOString(), roomId, memberId).run();
+  await env.DB.prepare(
+    'DELETE FROM invites WHERE room_id = ? AND member_id = ?'
+  ).bind(roomId, memberId).run();
+  return jsonResponse({ success: true, revoked: res.meta?.changes ?? 0 });
+}
+
+async function inviteAdminResponse(env, roomId, request, path) {
+  if (request.method !== 'POST') return jsonResponse({ error: 'Endpoint không tồn tại' }, 404);
+  const body = await request.json().catch(() => ({}));
+  if (path === 'admin/invites') return mintInvite(env, roomId, body);
+  if (path === 'admin/revoke') return revokeMemberSessions(env, roomId, body);
+  return jsonResponse({ error: 'Endpoint không tồn tại' }, 404);
+}
+
 // slug từ tên phòng: bỏ dấu, lowercase, ký tự không hợp lệ -> '-'
 function slugify(name) {
   const noAccents = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\u0111/g, 'd').replace(/\u0110/g, 'D');
@@ -166,7 +275,7 @@ export async function onRequest(context) {
       }
 
       const roomRow = await env.DB
-        .prepare('SELECT room_id, name FROM rooms WHERE room_id = ?')
+        .prepare('SELECT room_id, name, owner_member_id FROM rooms WHERE room_id = ?')
         .bind(roomId)
         .first();
       if (!roomRow) {
@@ -196,6 +305,9 @@ export async function onRequest(context) {
         hasD1: true,
         room_id: roomId,
         room_name: roomRow.name,
+        // client cần để ẩn nút "Ngưng hoạt động" đúng người và hiện badge "Chủ".
+        // member_id vốn đã nằm trong payload nên đây không phải thông tin mới lộ.
+        owner_member_id: roomRow.owner_member_id || null,
         settings,
         members: membersRes.results || [],
         periods: periodsRes.results || [],
@@ -270,7 +382,7 @@ export async function onRequest(context) {
 
       const tokenHash = await sha256Hex(token);
       const invite = await env.DB.prepare(`
-        SELECT room_id, member_id, expires_at, uses_left FROM invites WHERE token_hash = ?
+        SELECT room_id, member_id, role, expires_at, uses_left FROM invites WHERE token_hash = ?
       `).bind(tokenHash).first();
       if (!invite) {
         return jsonResponse({ error: 'Link mời không tồn tại hoặc đã bị thu hồi.', need_invite: true }, 404);
@@ -296,7 +408,9 @@ export async function onRequest(context) {
         ).bind(newName, newPhone, memberId, roomId2).run();
       }
 
-      const session = await createSession(env.DB, roomId2, memberId, 'member');
+      // Quyền đi từ link, không từ client: người mở link nhận đúng mức chủ phòng đã chọn.
+      const role = normalizeRole(invite.role);
+      const session = await createSession(env.DB, roomId2, memberId, role);
       const roomRow = await env.DB.prepare('SELECT name FROM rooms WHERE room_id = ?').bind(roomId2).first();
       const meRow = await env.DB.prepare('SELECT name, nickname FROM members WHERE id = ? AND room_id = ?')
         .bind(memberId, roomId2).first();
@@ -307,6 +421,7 @@ export async function onRequest(context) {
         room_name: roomRow?.name || roomId2,
         member_id: memberId,
         member_name: meRow?.name || '',
+        role,
         session,
       });
     }
@@ -338,6 +453,9 @@ export async function onRequest(context) {
       if (session.roomId !== roomId) {
         return jsonResponse({ error: 'Phiên không thuộc phòng này.', room_id: roomId }, 403);
       }
+      if (session.role === 'viewer') {
+        return jsonResponse({ error: 'Link mời này chỉ cho xem sổ, không đánh dấu được.', room_id: roomId }, 403);
+      }
       const body = await request.json();
       const periodId = String(body.period_id || '');
       if (!/^\d{4}-\d{2}$/.test(periodId)) return jsonResponse({ error: 'Kỳ không hợp lệ.' }, 400);
@@ -359,10 +477,50 @@ export async function onRequest(context) {
       return jsonResponse({ success: true, member_id: memberId, is_paid: isPaid, paid_at: paidAt });
     }
 
+    // 6b. POST /api/rooms/leave - Tự rời khỏi phòng (server), khác "gỡ khỏi máy này".
+    // Credential tự chọn: Bearer session (member_id LẤY TỪ PHIÊN, không từ body — cùng
+    // nguyên tắc với toggle-share-paid) HOẶC PIN + member_id trong body, để chủ phòng
+    // tạo phòng bằng PIN mà chưa từng có phiên cũng rời được.
+    // Hậu quả giống DELETE member: is_active=0, mọi phiên thu hồi, mọi link mời bị xóa;
+    // member_shares và split_config vẫn còn -> lịch sử tiền không đổi.
+    if (path === 'rooms/leave' && method === 'POST') {
+      const body = await request.json().catch(() => ({}));
+      const session = await readSession(env.DB, request);
+      const byPin = await verifyAdmin(env, roomId, request.headers.get('x-admin-hash'));
+      let memberId;
+      if (session && !session.err && session.roomId === roomId) {
+        memberId = session.memberId;
+      } else if (byPin) {
+        memberId = String(body.member_id || '');
+        if (!memberId) return jsonResponse({ error: 'Cần member_id khi dùng PIN.' }, 400);
+        const known = await env.DB.prepare('SELECT id FROM members WHERE id = ? AND room_id = ?')
+          .bind(memberId, roomId).first();
+        if (!known) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
+      } else {
+        return jsonResponse(
+          { error: 'Cần phiên đăng nhập hoặc PIN của phòng để rời phòng.', need_invite: true },
+          401
+        );
+      }
+      const blocked = await checkRemovable(env.DB, roomId, memberId);
+      if (blocked) return jsonResponse({ error: blocked, room_id: roomId }, 409);
+      await deactivateMember(env.DB, roomId, memberId);
+      return jsonResponse({ success: true, room_id: roomId, member_id: memberId, left: true });
+    }
+
     // ---- Từ đây trở xuống cần PIN admin (theo từng phòng) ----
-    const adminHash = request.headers.get('x-admin-hash') || request.headers.get('authorization')?.replace('Bearer ', '');
-    const isAuthed = await verifyAdmin(env, roomId, adminHash);
-    if (!isAuthed) {
+    // Bearer session chỉ thay được PIN ở đúng hai endpoint mời/thu hồi, và chỉ khi
+    // phiên đó có role='manager' (link mời mức manager). Mọi đường ghi khác vẫn
+    // 401 với session: quyền "mời người" không kéo theo quyền "sửa sổ".
+    const adminHash = request.headers.get('x-admin-hash');
+    const isPin = await verifyAdmin(env, roomId, adminHash);
+    if (!isPin && INVITE_PATHS_FOR_MANAGER.includes(path)) {
+      const session = await readSession(env.DB, request);
+      if (session && !session.err && session.roomId === roomId && session.role === 'manager') {
+        return inviteAdminResponse(env, roomId, request, path);
+      }
+    }
+    if (!isPin) {
       return jsonResponse({ error: 'Mã xác thực Admin không hợp lệ hoặc hết hạn!', room_id: roomId }, 401);
     }
 
@@ -413,17 +571,18 @@ export async function onRequest(context) {
       return jsonResponse({ success: true, id });
     }
 
-    // 5. DELETE /api/admin/members - Delete member
+    // 5. DELETE /api/admin/members/:id - Ngưng hoạt động + cắt quyền, KHÔNG xóa lịch sử.
+    // member_shares và expenses.split_config giữ nguyên: khoản nước tháng trước vẫn thuộc
+    // về người đó, và số tiền của những người còn lại không đổi khi có người rời.
     if (path.startsWith('admin/members/') && method === 'DELETE') {
       const id = path.split('/')[2];
-      await env.DB.batch([
-        env.DB.prepare('DELETE FROM members WHERE id = ? AND room_id = ?').bind(id, roomId),
-        env.DB.prepare('DELETE FROM member_shares WHERE member_id = ? AND room_id = ?').bind(id, roomId),
-        env.DB.prepare('UPDATE expenses SET target_member_id = NULL WHERE target_member_id = ? AND room_id = ?').bind(id, roomId),
-        env.DB.prepare('DELETE FROM invites WHERE member_id = ? AND room_id = ?').bind(id, roomId),
-        env.DB.prepare('DELETE FROM sessions WHERE member_id = ? AND room_id = ?').bind(id, roomId),
-      ]);
-      return jsonResponse({ success: true });
+      const blocked = await checkRemovable(env.DB, roomId, id);
+      if (blocked) return jsonResponse({ error: blocked, room_id: roomId }, 409);
+      const exists = await env.DB.prepare('SELECT id FROM members WHERE id = ? AND room_id = ?')
+        .bind(id, roomId).first();
+      if (!exists) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
+      await deactivateMember(env.DB, roomId, id);
+      return jsonResponse({ success: true, deactivated: true, member_id: id });
     }
 
     // 6. POST /api/admin/periods - Add or update period
@@ -561,48 +720,32 @@ export async function onRequest(context) {
     }
 
     // 11. POST /api/admin/invites - Sinh link mời cho MỘT thành viên cụ thể
-    // Body: { member_id, ttl_min?, uses? } -> { token, expires_at }
+    // Body: { member_id, role?, ttl_min?, uses? } -> { token, expires_at, role }
     // Token thô chỉ đi qua dây một lần; DB chỉ chứa SHA-256 của nó.
     if (path === 'admin/invites' && method === 'POST') {
-      const body = await request.json();
-      const memberId = String(body.member_id || '');
-      const ttlMin = Math.min(1440, Math.max(1, parseInt(body.ttl_min) || INVITE_TTL_MIN_DEFAULT));
-      const uses = Math.min(5, Math.max(1, parseInt(body.uses) || 1));
-
-      const member = await env.DB.prepare('SELECT id, name, nickname FROM members WHERE id = ? AND room_id = ?')
-        .bind(memberId, roomId).first();
-      if (!member) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
-
-      // Tạo link mới = vô hiệu hoá link cũ còn sót của đúng thành viên đó.
-      const token = await newToken();
-      await env.DB.batch([
-        env.DB.prepare('DELETE FROM invites WHERE room_id = ? AND member_id = ?').bind(roomId, memberId),
-        env.DB.prepare('INSERT INTO invites (token_hash, room_id, member_id, expires_at, uses_left) VALUES (?, ?, ?, ?, ?)')
-          .bind(await sha256Hex(token), roomId, memberId, isoAfter(ttlMin * 60 * 1000), uses),
-      ]);
-      return jsonResponse({
-        success: true,
-        room_id: roomId,
-        member_id: memberId,
-        token,
-        ttl_min: ttlMin,
-        uses_left: uses,
-        expires_at: isoAfter(ttlMin * 60 * 1000),
-      });
+      return mintInvite(env, roomId, await request.json());
     }
 
     // 12. POST /api/admin/revoke - Đá khỏi phòng: thu hồi mọi phiên của một thành viên
-    // (xóa luôn thành viên thì dùng DELETE /api/admin/members/:id).
+    // (ngưng luôn tư cách thành viên thì dùng DELETE /api/admin/members/:id).
     if (path === 'admin/revoke' && method === 'POST') {
+      return revokeMemberSessions(env, roomId, await request.json());
+    }
+
+    // 13. POST /api/admin/transfer-owner - Giao phòng cho một thành viên đang hoạt động.
+    // Không có endpoint này thì guard "chủ phòng không tự rời" thành bẫy: phòng có chủ
+    // vĩnh viễn không bỏ được.
+    if (path === 'admin/transfer-owner' && method === 'POST') {
       const body = await request.json();
       const memberId = String(body.member_id || '');
-      const res = await env.DB.prepare(
-        'UPDATE sessions SET revoked_at = ? WHERE room_id = ? AND member_id = ? AND revoked_at IS NULL'
-      ).bind(new Date().toISOString(), roomId, memberId).run();
-      await env.DB.prepare(
-        'DELETE FROM invites WHERE room_id = ? AND member_id = ?'
-      ).bind(roomId, memberId).run();
-      return jsonResponse({ success: true, revoked: res.meta?.changes ?? 0 });
+      const target = await env.DB.prepare('SELECT id, is_active FROM members WHERE id = ? AND room_id = ?')
+        .bind(memberId, roomId).first();
+      if (!target) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
+      if (!target.is_active) {
+        return jsonResponse({ error: 'Không giao phòng cho người đã ngưng hoạt động.', room_id: roomId }, 409);
+      }
+      await env.DB.prepare('UPDATE rooms SET owner_member_id = ? WHERE room_id = ?').bind(memberId, roomId).run();
+      return jsonResponse({ success: true, room_id: roomId, owner_member_id: memberId });
     }
 
     return jsonResponse({ error: 'Endpoint không tồn tại' }, 404);
