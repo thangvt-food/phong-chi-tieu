@@ -274,24 +274,24 @@ try:
     d = json.load(open("/tmp/pr6-live.json"))
 except Exception as e:
     raise SystemExit("  ! không đọc được JSON: %s" % e)
-if "error" in d:
-    raise SystemExit("  ! LỖI: %s" % d["error"])
-# room_id chỉ tồn tại ở code MỚI. Không có nó nghĩa là phong-chi-tieu.pages.dev vẫn
-# đang serve bundle cũ (deploy rơi vào Preview) — tức là prod chưa được cập nhật.
-if not d.get("room_id"):
-    raise SystemExit("  ! PRODUCTION VẪN CHẠY CODE CŨ (response không có room_id). "
+# Từ 004, /api/data đòi Bearer: 401 + needs_auth nghĩa là bundle mới đã lên Production.
+# (Code cũ trả 200 công khai kèm room_id.)
+if d.get("needs_auth"):
+    print("  OK: code mới đã lên Production (401 needs_auth, đúng thiết kế)")
+elif d.get("room_id"):
+    raise SystemExit("  ! PRODUCTION VẪN CHẠY CODE CŨ (200 công khai + room_id). "
                      "Kiểm tra: npx wrangler pages deployment list --project-name=phong-chi-tieu")
-print("  members=%d periods=%d expenses=%d shares=%d | transfer_code=%s" % (
-    len(d["members"]), len(d["periods"]), len(d["expenses"]),
-    len(d["member_shares"]), d["settings"].get("transfer_code")))
-' || echo "  ! kiểm tra live thất bại — cân nhắc --rollback $EXPORT"
-    echo "  PIN vẫn là hash cũ: $(d1r "SELECT substr(value,1,8)||'…' v FROM settings WHERE room_id='$ROOM' AND key='admin_pin_hash'")"
+elif "error" in d:
+    raise SystemExit("  ! LỖI: %s" % d["error"])
+else:
+    raise SystemExit("  ! phản hồi lạ: %s" % d)
+' || echo "  ! kiểm tra live thất bại — đọc thông báo ở trên trước khi nghĩ tới rollback."
   fi
 fi
 
 say "Còn lại làm tay trong app"
 cat <<EOF
-  - Vào $DOMAIN, mở Cài đặt > PIN & Mời người, đặt PIN mới nếu chưa chạy --rotate-pin.
-  - Tạo thử phòng thứ hai (nút trên Header > Tạo phòng / vào bằng link mời).
-  - Gửi link mời cho một người thật, mở bằng điện thoại khác, kiểm tra hết hạn 15'.
+  - Vào $DOMAIN/?p=$ROOM, chọn "Khôi phục chủ phòng bằng PIN", đặt tài khoản + PIN mới.
+  - Cài đặt > Thành viên: tạo link claim cho những người chưa có tài khoản.
+  - Không nhập PIN vào terminal: mọi bước PIN chỉ gõ trong app.
 EOF

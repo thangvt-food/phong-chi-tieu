@@ -6,151 +6,113 @@ import {
   Users,
   Settings,
   CreditCard,
-  Key,
+  KeyRound,
   Calendar,
   CheckCircle2,
   Copy,
   Check,
   Link2,
-  LogOut,
   Loader2,
   AlertCircle,
+  UserX,
+  UserCheck,
+  UserPlus,
+  ShieldAlert,
+  Crown,
 } from 'lucide-react';
 import { VIETNAM_BANKS } from '../constants/banks';
 import {
   saveMember,
-  deleteMember,
   savePeriod,
   deletePeriod,
   updateSettings,
-  setStoredAdminHash,
   defaultTransferCode,
   createInvite,
-  revokeMemberSession,
   transferOwner,
+  deactivateMember,
+  reactivateMember,
+  setMemberRole,
+  unlinkMember,
+  setRoomPin,
 } from '../services/api';
-import { sha256 } from '../services/crypto';
+import { INVITE_ROLES, ROLE_BADGE, ROLE_LABEL, roleRank } from '../constants/roles';
 
-// Ba mức quyền của link mời, khớp CHECK trong invites.role (migration 003).
-const INVITE_ROLES = [
-  { id: 'viewer', label: 'Chỉ xem', desc: 'xem được sổ, không tick "đã nộp" được.' },
-  { id: 'member', label: 'Thành viên', desc: 'xem sổ + tự tick đã nộp cho phần của mình (mặc định).' },
-  { id: 'manager', label: 'Quản lý mời', desc: 'như thành viên, thêm tạo lại link và thu hồi phiên. KHÔNG sửa được kỳ/khoản/PIN.' },
-];
-
-export default function AdminDashboard({
-  isOpen,
-  onClose,
-  roomId,
-  data,
-  adminHash,
-  session,
-  onDataRefresh,
-}) {
-  // NOTE: hook phải chạy trước mọi `return` (Rules of Hooks).
-  const [activeTab, setActiveTab] = useState('members'); // 'members', 'settings', 'security', 'periods'
+export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDataRefresh }) {
+  const [activeTab, setActiveTab] = useState('members');
   const [copiedLink, setCopiedLink] = useState(false);
 
-  // Form states for Member
-  const [memberForm, setMemberForm] = useState({
-    name: '',
-    nickname: '',
-    phone: '',
-  });
+  const [memberForm, setMemberForm] = useState({ name: '', nickname: '', phone: '' });
+  const [periodForm, setPeriodForm] = useState({ title: '', due_date: '' });
 
-  // Form states for Period
-  const [periodForm, setPeriodForm] = useState({
-    title: '',
-    due_date: '',
-  });
-
-  // Form states for Bank Settings
   const [settingsForm, setSettingsForm] = useState({
-    room_name: data.settings?.room_name || '',
-    bank_id: data.settings?.bank_id || 'MB',
-    account_no: data.settings?.account_no || '',
-    account_name: data.settings?.account_name || '',
-    transfer_prefix: data.settings?.transfer_prefix || 'TIEN PHONG',
-    transfer_code: data.settings?.transfer_code || defaultTransferCode(roomId),
+    room_name: '',
+    bank_id: 'MB',
+    account_no: '',
+    account_name: '',
+    transfer_prefix: 'TIEN PHONG',
+    transfer_code: '',
   });
 
-  // Đổi phòng / tải lại dữ liệu thì form phải theo phòng, không giữ số của phòng trước.
+  const [pinForm, setPinForm] = useState({ pin: '', confirm: '' });
+  const [pinError, setPinError] = useState('');
+  const [pinSuccess, setPinSuccess] = useState('');
+
+  const [invite, setInvite] = useState(null);
+  const [inviteBusy, setInviteBusy] = useState('');
+  const [inviteError, setInviteError] = useState('');
+  const [inviteRole, setInviteRole] = useState('member');
+
   useEffect(() => {
-    const s = data.settings || {};
+    const s = data?.settings || {};
     setSettingsForm({
-      room_name: s.room_name || '',
+      room_name: s.room_name || data?.room_name || '',
       bank_id: s.bank_id || 'MB',
       account_no: s.account_no || '',
       account_name: s.account_name || '',
       transfer_prefix: s.transfer_prefix || 'TIEN PHONG',
       transfer_code: s.transfer_code || defaultTransferCode(roomId),
     });
-  }, [roomId, data.settings]);
-
-  // Security Form
-  const [newPin, setNewPin] = useState('');
-  const [newPinHash, setNewPinHash] = useState('');
-  const [securitySuccess, setSecuritySuccess] = useState('');
-
-  // Invite link: { member_id, memberName, role, link, expires_at }
-  const [invite, setInvite] = useState(null);
-  const [inviteBusy, setInviteBusy] = useState('');
-  const [inviteError, setInviteError] = useState('');
-  const [inviteRole, setInviteRole] = useState('member');
+  }, [roomId, data?.settings, data?.room_name]);
 
   if (!isOpen) return null;
 
-  // Link mức "Quản lý mời" không có PIN. Server chỉ mở đúng hai đường
-  // admin/invites + admin/revoke cho nó, nên ở đây cũng chỉ vẽ hai hành động đó;
-  // các tab kia mà để lại thì mỗi nút bấm đều là một lần 401.
-  const managerOnly = !adminHash && session?.role === 'manager';
+  const myRank = roleRank(me?.role);
+  const isOwner = me?.role === 'owner';
+  const canManage = myRank >= 3;
+  if (!canManage) return null;
 
-  const handlePinChange = async (val) => {
-    setNewPin(val);
-    if (val) {
-      const h = await sha256(val);
-      setNewPinHash(h);
-    } else {
-      setNewPinHash('');
-    }
-  };
+  const members = data?.members || [];
+  const activeCount = members.filter((m) => m.is_active !== 0).length;
+
+  // Chỉ thao tác được lên người thấp quyền hơn mình; chủ phòng không bị đụng tới.
+  const canActOn = (m) => m.id !== me?.member_id && roleRank(m.role) < myRank;
 
   const handleSaveMember = async (e) => {
     e.preventDefault();
-    if (!memberForm.name) {
+    if (!memberForm.name.trim()) {
       alert('Vui lòng nhập họ và tên!');
       return;
     }
-
-    await saveMember(
-      roomId,
-      {
-        name: memberForm.name,
-        nickname: memberForm.nickname,
-        phone: memberForm.phone,
-        is_active: 1,
-      },
-      adminHash
-    );
-
+    const result = await saveMember(roomId, {
+      name: memberForm.name.trim(),
+      nickname: memberForm.nickname.trim(),
+      phone: memberForm.phone.trim(),
+    });
+    if (!result.success) {
+      alert(result.error || 'Không thêm được thành viên.');
+      return;
+    }
     setMemberForm({ name: '', nickname: '', phone: '' });
     onDataRefresh();
   };
 
-  const activeCount = (data.members || []).filter((m) => m.is_active !== 0).length;
-  const ownerId = data.owner_member_id || null;
-
-  const handleDeleteMember = async (m) => {
-    const isOwner = m.id === ownerId;
-    const ok = confirm(
-      isOwner
-        ? 'Bạn là chủ phòng. Muốn rời đi thì phải "Giao phòng" cho người khác trước.'
-        : `Ngưng hoạt động ${m.name}?\n\n` +
-          'Mất quyền vào phòng ở mọi thiết bị ngay lập tức. Tên, phần tiền và các khoản đã chia của bạn ấy ' +
-          'vẫn nằm nguyên trong sổ những kỳ cũ.'
-    );
-    if (!ok) return;
-    const result = await deleteMember(roomId, m.id, adminHash);
+  const handleDeactivate = async (m) => {
+    if (!confirm(
+      `Ngưng hoạt động ${m.name}?\n\n` +
+        'Mất quyền vào phòng ngay lập tức. Tên, phần tiền và các khoản đã chia của người này ' +
+        'vẫn nằm nguyên trong sổ các kỳ cũ.'
+    )) return;
+    const result = await deactivateMember(roomId, m.id);
     if (!result.success) {
       alert(result.error || 'Không ngưng hoạt động được.');
       return;
@@ -159,25 +121,46 @@ export default function AdminDashboard({
     onDataRefresh();
   };
 
-  // Người rời vẫn là một dòng trong members, không phải mồ côi: thêm lại chính id đó
-  // thì lịch sử cũ của họ nối tiếp, thay vì tạo một người trùng tên.
   const handleReactivate = async (m) => {
-    const result = await saveMember(roomId, { ...m, is_active: 1 }, adminHash);
-    if (result === false) {
-      alert('Không thêm lại được (máy chủ từ chối).');
+    const result = await reactivateMember(roomId, m.id);
+    if (!result.success) {
+      alert(result.error || 'Không thêm lại được.');
+      return;
+    }
+    onDataRefresh();
+  };
+
+  const handleRoleChange = async (m, role) => {
+    if (role === m.role) return;
+    if (!confirm(`Đổi quyền của ${m.name} thành "${ROLE_LABEL[role]}"?`)) return;
+    const result = await setMemberRole(roomId, m.id, role);
+    if (!result.success) {
+      alert(result.error || 'Không đổi được quyền.');
+      return;
+    }
+    onDataRefresh();
+  };
+
+  const handleUnlink = async (m) => {
+    if (!confirm(
+      `Gỡ tài khoản khỏi ${m.name}?\n\n` +
+        'Tài khoản của người đó mất quyền vào phòng này (các phòng khác không đổi). ' +
+        'Muốn vào lại thì bạn gửi một link mời mới. Lịch sử tiền vẫn giữ nguyên.'
+    )) return;
+    const result = await unlinkMember(roomId, m.id);
+    if (!result.success) {
+      alert(result.error || 'Không gỡ được liên kết.');
       return;
     }
     onDataRefresh();
   };
 
   const handleTransferOwner = async (m) => {
-    const ok = confirm(
+    if (!confirm(
       `Giao phòng cho ${m.name}?\n\n` +
-        'Người đó thành chủ phòng: chỉ họ mới tạo link mức "Quản lý mời" và bạn mới rời phòng được. ' +
-        'Bạn vẫn ở trong phòng như một thành viên bình thường.'
-    );
-    if (!ok) return;
-    const result = await transferOwner(roomId, m.id, adminHash);
+        'Người đó thành chủ phòng và giữ mã khôi phục của phòng. Bạn hạ xuống Quản lý.'
+    )) return;
+    const result = await transferOwner(roomId, m.id);
     if (!result.success) {
       alert(result.error || 'Không giao phòng được.');
       return;
@@ -185,25 +168,14 @@ export default function AdminDashboard({
     onDataRefresh();
   };
 
-  // Link mời gắn với ĐÚNG một thành viên: ai bấm vào sẽ được nhận là người đó.
   const handleCreateInvite = async (member, role = inviteRole) => {
     setInviteBusy(member.id);
     setInviteError('');
-    const result = await createInvite(
-      roomId,
-      member.id,
-      { ttlMin: 15, uses: 1, role },
-      adminHash,
-      managerOnly ? session.token : undefined
-    );
+    const result = await createInvite(roomId, member.id, { role });
     setInviteBusy('');
     if (!result.success) {
       setInvite(null);
-      setInviteError(
-        result.unauthorized
-          ? 'Cần nhập lại PIN phòng này để tạo link.'
-          : result.error || 'Không tạo được link mời (cần chế độ online).'
-      );
+      setInviteError(result.error || 'Không tạo được link mời.');
       return;
     }
     setInviteRole(result.role || role);
@@ -217,75 +189,80 @@ export default function AdminDashboard({
     });
   };
 
-  const handleRevoke = async (member) => {
-    if (!confirm(`Thu hồi phiên của ${member.name}? Bạn ấy sẽ cần link mời mới.`)) return;
-    const result = await revokeMemberSession(
-      roomId,
-      member.id,
-      adminHash,
-      managerOnly ? session.token : undefined
-    );
-    if (!result.success) {
-      alert(result.error || 'Không thu hồi được.');
-      return;
-    }
-    alert(result.revoked > 0 ? `Đã thu hồi ${result.revoked} phiên.` : 'Thành viên đó chưa có phiên nào.');
-  };
-
   const handleSavePeriod = async (e) => {
     e.preventDefault();
-    if (!periodForm.title) {
+    if (!periodForm.title.trim()) {
       alert('Vui lòng nhập tên kỳ (VD: Tháng 11/2026)!');
       return;
     }
-
-    const id = 'period_' + Date.now();
-    await savePeriod(
-      roomId,
-      {
-        id,
-        title: periodForm.title,
-        due_date: periodForm.due_date,
-        status: 'open',
-      },
-      adminHash
-    );
-
+    const result = await savePeriod(roomId, {
+      id: 'period_' + Date.now(),
+      title: periodForm.title.trim(),
+      due_date: periodForm.due_date,
+      status: 'open',
+    });
+    if (!result.success) {
+      alert(result.error || 'Không tạo được kỳ.');
+      return;
+    }
     setPeriodForm({ title: '', due_date: '' });
     onDataRefresh();
   };
 
   const handleSaveSettings = async (e) => {
     e.preventDefault();
-    await updateSettings(roomId, settingsForm, adminHash);
-    onDataRefresh();
-    alert('Đã cập nhật thông tin phòng & tài khoản VietQR thành công!');
+    const result = await updateSettings(roomId, settingsForm);
+    if (!result.success) {
+      alert(result.error || 'Không lưu được cài đặt.');
+      return;
+    }
+    await onDataRefresh();
+    alert('Đã cập nhật thông tin phòng & tài khoản VietQR!');
   };
 
-  const handleSaveNewPin = async (e) => {
+  const handleSavePin = async (e) => {
     e.preventDefault();
-    if (!newPin || !newPinHash) return;
-
-    await updateSettings(roomId, { admin_pin_hash: newPinHash }, adminHash);
-    setStoredAdminHash(roomId, newPinHash);
-    setSecuritySuccess('Đã cập nhật mã PIN & Hash mới thành công!');
-    setNewPin('');
-    setTimeout(() => setSecuritySuccess(''), 4000);
+    setPinError('');
+    setPinSuccess('');
+    if (!/^\d{6,12}$/.test(pinForm.pin)) {
+      setPinError('Mã khôi phục cần 6–12 chữ số.');
+      return;
+    }
+    if (pinForm.pin !== pinForm.confirm) {
+      setPinError('Hai lần nhập mã không khớp.');
+      return;
+    }
+    const result = await setRoomPin(roomId, pinForm.pin);
+    if (!result.success) {
+      setPinError(result.error || 'Không đổi được mã khôi phục.');
+      return;
+    }
+    setPinForm({ pin: '', confirm: '' });
+    setPinSuccess('Đã đổi mã khôi phục. Mã cũ không còn dùng được.');
+    setTimeout(() => setPinSuccess(''), 5000);
   };
+
+  const inviteRoleOptions = isOwner ? INVITE_ROLES : INVITE_ROLES.filter((r) => r.id !== 'manager');
+
+  const tabClass = (key) =>
+    `px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
+      activeTab === key
+        ? 'bg-white text-indigo-700 shadow-sm border border-slate-200'
+        : 'text-slate-600 hover:text-slate-900'
+    }`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
       <div className="bg-white rounded-3xl max-w-xl w-full overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[90vh]">
-        {/* Header */}
         <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center">
               <Settings className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h2 className="font-bold text-base">Cài Đặt Quản Trị Phòng</h2>
+              <h2 className="font-bold text-base">Cài đặt phòng</h2>
               <p className="text-[11px] text-slate-400">
-                Quản lý thành viên, thông tin VietQR và mật mã Admin
+                {data?.room_name || roomId} · bạn là {ROLE_LABEL[me?.role] || me?.role}
               </p>
             </div>
           </div>
@@ -297,132 +274,75 @@ export default function AdminDashboard({
           </button>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="flex items-center gap-1 px-4 py-2 bg-slate-50 border-b border-slate-200 overflow-x-auto scrollbar-none shrink-0">
-          <button
-            onClick={() => setActiveTab('members')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
-              activeTab === 'members'
-                ? 'bg-white text-indigo-700 shadow-sm border border-slate-200'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" /> Thành viên ({(data.members || []).length})
+        <div className="flex items-center gap-1 px-4 py-2 bg-slate-50 border-b border-slate-200 overflow-x-auto shrink-0">
+          <button onClick={() => setActiveTab('members')} className={tabClass('members')}>
+            <Users className="w-3.5 h-3.5" /> Thành viên ({members.length})
           </button>
-
-          {!managerOnly && (
-            <>
-              <button
-                onClick={() => setActiveTab('settings')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
-                  activeTab === 'settings'
-                    ? 'bg-white text-indigo-700 shadow-sm border border-slate-200'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <CreditCard className="w-3.5 h-3.5" /> STK VietQR
-              </button>
-
-              <button
-                onClick={() => setActiveTab('security')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
-                  activeTab === 'security'
-                    ? 'bg-white text-indigo-700 shadow-sm border border-slate-200'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <Key className="w-3.5 h-3.5" /> PIN & Mời người
-              </button>
-
-              <button
-                onClick={() => setActiveTab('periods')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
-                  activeTab === 'periods'
-                    ? 'bg-white text-indigo-700 shadow-sm border border-slate-200'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <Calendar className="w-3.5 h-3.5" /> Quản lý kỳ
-              </button>
-            </>
+          <button onClick={() => setActiveTab('periods')} className={tabClass('periods')}>
+            <Calendar className="w-3.5 h-3.5" /> Kỳ
+          </button>
+          {isOwner && (
+            <button onClick={() => setActiveTab('settings')} className={tabClass('settings')}>
+              <CreditCard className="w-3.5 h-3.5" /> VietQR
+            </button>
+          )}
+          {isOwner && (
+            <button onClick={() => setActiveTab('security')} className={tabClass('security')}>
+              <KeyRound className="w-3.5 h-3.5" /> Mã khôi phục
+            </button>
           )}
         </div>
 
-        {/* Tab Body */}
         <div className="p-5 overflow-y-auto space-y-4">
-          {/* TAB 1: MEMBERS */}
           {activeTab === 'members' && (
             <div className="space-y-4">
-              {managerOnly ? (
-                <p className="text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-2xl p-3">
-                  Bạn vào đây bằng link <span className="font-semibold">"Quản lý mời"</span>: tạo lại
-                  link và thu hồi phiên thì được, còn thêm người, sửa kỳ, đổi PIN vẫn cần mã PIN của
-                  phòng. Chủ phòng là người đưa cho bạn mức quyền này.
-                </p>
-              ) : (
-              <>
-              {/* Add Member Form */}
-              <form
-                onSubmit={handleSaveMember}
-                className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3"
-              >
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                  Thêm bạn cùng phòng mới
+              <form onSubmit={handleSaveMember} className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <UserPlus className="w-3.5 h-3.5" /> Thêm người vào sổ
                 </h4>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                      Họ và tên:
-                    </label>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Họ và tên:</label>
                     <input
-                      type="text"
-                      placeholder="VD: Nguyễn Văn An"
                       value={memberForm.name}
                       onChange={(e) => setMemberForm({ ...memberForm, name: e.target.value })}
+                      placeholder="VD: Nguyễn Văn An"
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
                     />
                   </div>
-
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                      Tên thường gọi / Biệt danh:
-                    </label>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Biệt danh:</label>
                     <input
-                      type="text"
-                      placeholder="VD: Bin, An..."
                       value={memberForm.nickname}
                       onChange={(e) => setMemberForm({ ...memberForm, nickname: e.target.value })}
+                      placeholder="VD: Bin, An..."
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
                     />
                   </div>
-
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                      Số điện thoại:
-                    </label>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Số điện thoại:</label>
                     <input
-                      type="text"
-                      placeholder="VD: 0901234567"
                       value={memberForm.phone}
                       onChange={(e) => setMemberForm({ ...memberForm, phone: e.target.value })}
+                      placeholder="VD: 0901234567"
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
                     />
                   </div>
                 </div>
-
-                <div className="flex justify-end pt-1">
+                <p className="text-[10px] text-slate-500">
+                  Người mới chỉ vào được sổ khi có tài khoản: sau khi thêm, bấm "Tạo link" ở dòng
+                  của họ và gửi link qua Zalo/SMS.
+                </p>
+                <div className="flex justify-end">
                   <button
                     type="submit"
                     className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm"
                   >
-                    Thêm vào phòng
+                    Thêm vào sổ
                   </button>
                 </div>
               </form>
-              </>
-              )}
 
-              {/* Invite link đang mở */}
               {(invite || inviteError) && (
                 <div className="p-3.5 bg-indigo-50/70 rounded-2xl border border-indigo-200 space-y-2">
                   {inviteError ? (
@@ -432,17 +352,18 @@ export default function AdminDashboard({
                     </div>
                   ) : (
                     <>
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-2">
                         <span className="text-[11px] font-bold text-indigo-900">
-                          Link mời cho {invite.memberName}
+                          Link mời cho {invite.memberName} ({ROLE_LABEL[invite.role]})
                         </span>
-                        <span className="text-[10px] text-indigo-700">
-                          hết hạn {new Date(invite.expires_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })} · dùng 1 lần
+                        <span className="text-[10px] text-indigo-700 shrink-0">
+                          hết hạn {new Date(invite.expires_at).toLocaleString('vi-VN', {
+                            day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                          })}
                         </span>
                       </div>
-                      {/* Ba mức quyền: chọn mức nào là link mới mang mức đó. */}
                       <div className="flex flex-wrap gap-1">
-                        {INVITE_ROLES.map((r) => (
+                        {inviteRoleOptions.map((r) => (
                           <button
                             key={r.id}
                             onClick={() => {
@@ -491,325 +412,155 @@ export default function AdminDashboard({
                         </button>
                       </div>
                       <p className="text-[10px] text-indigo-700">
-                        Gửi link này cho đúng bạn đó qua Zalo/SMS. Hết 15 phút thì bấm "Tạo lại".
+                        Link chỉ dùng được một lần và chỉ nhận cho đúng người này.
                       </p>
                     </>
                   )}
                 </div>
               )}
 
-              {/* Members List */}
               <div className="space-y-2">
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                  Danh sách thành viên hiện tại
+                  Thành viên
                 </h4>
-                {data.members.map((m) => {
+                {members.map((m) => {
                   const gone = m.is_active === 0;
-                  const isOwner = m.id === ownerId;
-                  // Chủ phòng và người active cuối cùng không có nút "ngưng": server
-                  // cũng chặn (409), ẩn ở đây để đừng ai bấm rồi nhận lỗi khó hiểu.
-                  const canDeactivate = !isOwner && !gone && activeCount > 1 && !managerOnly;
+                  const owner = m.role === 'owner';
+                  const hasAccount = !!m.has_account;
                   return (
-                  <div
-                    key={m.id}
-                    className={`p-3 border rounded-xl flex items-center justify-between gap-2 ${
-                      gone ? 'bg-slate-50 border-slate-200 opacity-70' : 'bg-white border-slate-200'
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <span className="font-semibold text-xs text-slate-800">
-                        {m.name} {m.nickname && `(${m.nickname})`}
-                      </span>
-                      {isOwner && (
-                        <span className="ml-1 px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold">
-                          Chủ
+                    <div
+                      key={m.id}
+                      className={`p-3 border rounded-xl space-y-2 ${
+                        gone ? 'bg-slate-50 border-slate-200 opacity-75' : 'bg-white border-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-semibold text-xs text-slate-800 truncate">
+                              {m.name}
+                              {m.nickname ? ` (${m.nickname})` : ''}
+                            </span>
+                            {m.id === me?.member_id && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-900 text-white">
+                                Bạn
+                              </span>
+                            )}
+                            <span
+                              className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ROLE_BADGE[m.role] || 'bg-slate-200 text-slate-700'}`}
+                            >
+                              {owner ? 'Chủ phòng' : m.role ? ROLE_LABEL[m.role] : 'Chưa có tài khoản'}
+                            </span>
+                            {gone && (
+                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600">
+                                Đã ngưng
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-0.5">
+                            {hasAccount ? 'Có tài khoản' : 'Chưa có tài khoản'}
+                            {m.phone ? ` · ${m.phone}` : ''}
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-semibold text-slate-400 shrink-0">
+                          {gone ? '' : hasAccount ? '' : 'Cần link mời'}
                         </span>
-                      )}
-                      {gone && (
-                        <span className="ml-1 px-1.5 py-0.5 rounded-md bg-slate-200 text-slate-600 text-[10px] font-bold">
-                          Đã rời
-                        </span>
-                      )}
-                      {m.phone && <span className="text-[11px] text-slate-400 block">{m.phone}</span>}
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {!gone && (
-                        <>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {!gone && !hasAccount && !owner && (
                           <button
                             onClick={() => handleCreateInvite(m)}
                             disabled={inviteBusy === m.id}
                             className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors disabled:opacity-50"
-                            title="Tạo link mời cho thành viên này"
                           >
                             {inviteBusy === m.id ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Link2 className="w-3.5 h-3.5" />
                             )}
-                            Link mời
+                            Tạo link
                           </button>
-                          <button
-                            onClick={() => handleRevoke(m)}
-                            className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
-                            title="Thu hồi phiên (đá khỏi phòng, vẫn là thành viên)"
+                        )}
+
+                        {isOwner && hasAccount && !owner && m.id !== me?.member_id && (
+                          <select
+                            value={m.role || 'member'}
+                            onChange={(e) => handleRoleChange(m, e.target.value)}
+                            className="px-2 py-1.5 rounded-lg text-[11px] font-semibold text-slate-700 bg-slate-50 border border-slate-200"
+                            title="Đổi quyền trong phòng"
                           >
-                            <LogOut className="w-3.5 h-3.5" />
+                            <option value="viewer">Chỉ xem</option>
+                            <option value="member">Thành viên</option>
+                            <option value="manager">Quản lý</option>
+                          </select>
+                        )}
+
+                        {isOwner && hasAccount && !owner && m.id !== me?.member_id && (
+                          <button
+                            onClick={() => handleUnlink(m)}
+                            className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
+                            title="Gỡ liên kết tài khoản (gửi link mời mới sau)"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" />
                           </button>
-                          {!isOwner && !managerOnly && (
-                            <button
-                              onClick={() => handleTransferOwner(m)}
-                              className="px-2 py-1.5 rounded-lg text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
-                              title="Giao quyền chủ phòng cho người này"
-                            >
-                              Giao phòng
-                            </button>
-                          )}
-                          {canDeactivate && (
-                            <button
-                              onClick={() => handleDeleteMember(m)}
-                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
-                              title="Ngưng hoạt động: mất quyền vào phòng, giữ nguyên lịch sử các kỳ cũ"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </>
-                      )}
-                      {gone && !managerOnly && (
-                        <button
-                          onClick={() => handleReactivate(m)}
-                          className="px-2 py-1.5 rounded-lg text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors"
-                          title="Thêm lại chính người này vào phòng (giữ phần tiền cũ), rồi tạo link mời mới"
-                        >
-                          Thêm lại
-                        </button>
-                      )}
+                        )}
+
+                        {isOwner && !owner && !gone && hasAccount && (
+                          <button
+                            onClick={() => handleTransferOwner(m)}
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
+                            title="Giao quyền chủ phòng"
+                          >
+                            <Crown className="w-3.5 h-3.5" /> Giao phòng
+                          </button>
+                        )}
+
+                        {canActOn(m) && !gone && !owner && activeCount > 1 && (
+                          <button
+                            onClick={() => handleDeactivate(m)}
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 transition-colors"
+                            title="Ngưng hoạt động: mất quyền vào phòng, giữ lịch sử"
+                          >
+                            <UserX className="w-3.5 h-3.5" /> Ngưng
+                          </button>
+                        )}
+
+                        {canActOn(m) && gone && (
+                          <button
+                            onClick={() => handleReactivate(m)}
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors"
+                            title="Cho phép vào phòng lại; cần link mới nếu chưa có tài khoản"
+                          >
+                            <UserCheck className="w-3.5 h-3.5" /> Thêm lại
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
                   );
                 })}
-                {ownerId === null && (
-                  <p className="text-[10px] text-slate-400">
-                    Phòng này chưa có chủ (tạo bằng link/PIN cũ). Giao phòng cho một người để
-                    người đó quản lý được quyền mời.
-                  </p>
-                )}
               </div>
             </div>
           )}
 
-          {/* TAB 2: VIETQR SETTINGS */}
-          {activeTab === 'settings' && (
-            <form onSubmit={handleSaveSettings} className="space-y-3.5">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Tên phòng / Nhà trọ:
-                  </label>
-                  <input
-                    type="text"
-                    value={settingsForm.room_name}
-                    onChange={(e) =>
-                      setSettingsForm({ ...settingsForm, room_name: e.target.value })
-                    }
-                    placeholder="VD: Phòng Trọ 2A"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Ngân hàng thụ hưởng:
-                  </label>
-                  <select
-                    value={settingsForm.bank_id}
-                    onChange={(e) =>
-                      setSettingsForm({ ...settingsForm, bank_id: e.target.value })
-                    }
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
-                  >
-                    {VIETNAM_BANKS.map((b) => (
-                      <option key={b.code} value={b.code}>
-                        {b.name} ({b.code})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Số tài khoản người thu:
-                  </label>
-                  <input
-                    type="text"
-                    value={settingsForm.account_no}
-                    onChange={(e) =>
-                      setSettingsForm({ ...settingsForm, account_no: e.target.value })
-                    }
-                    placeholder="VD: 0987654321"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Tên chủ tài khoản:
-                  </label>
-                  <input
-                    type="text"
-                    value={settingsForm.account_name}
-                    onChange={(e) =>
-                      setSettingsForm({
-                        ...settingsForm,
-                        account_name: e.target.value.toUpperCase(),
-                      })
-                    }
-                    placeholder="VD: NGUYEN VAN A"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none uppercase"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Tiền tố nội dung chuyển khoản:
-                  </label>
-                  <input
-                    type="text"
-                    value={settingsForm.transfer_prefix}
-                    onChange={(e) =>
-                      setSettingsForm({ ...settingsForm, transfer_prefix: e.target.value })
-                    }
-                    placeholder="VD: TIEN PHONG"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
-                  />
-                </div>
-
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Mã phòng trong nội dung chuyển khoản:
-                  </label>
-                  <input
-                    type="text"
-                    value={settingsForm.transfer_code}
-                    onChange={(e) =>
-                      setSettingsForm({ ...settingsForm, transfer_code: e.target.value.toUpperCase() })
-                    }
-                    placeholder={defaultTransferCode(roomId)}
-                    maxLength={6}
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono uppercase"
-                  />
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    Nội dung sẽ là <span className="font-mono text-slate-700">TIEN PHONG {settingsForm.transfer_code} {`<tên bạn>`} {`<kỳ>`}</span>.
-                    Đứng trước tên người nên không bị ngân hàng cắt mất khi nhiều phòng
-                    cùng nhận vào một số tài khoản.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex justify-end pt-2">
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
-                >
-                  Lưu cài đặt VietQR
-                </button>
-              </div>
-            </form>
-          )}
-
-          {/* TAB 3: SECURITY */}
-          {activeTab === 'security' && (
-            <div className="space-y-4">
-              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 space-y-1.5">
-                <span className="text-xs font-semibold text-slate-700 block">
-                  PIN của phòng <span className="font-mono text-indigo-700">{roomId}</span>
-                </span>
-                <p className="text-[11px] text-slate-500">
-                  PIN này chỉ mở khoá Cài đặt của phòng này; phòng khác có PIN riêng. Không ai
-                  nhìn thấy PIN thật — máy chủ chỉ giữ mã SHA-256 của nó.
-                </p>
-              </div>
-
-              {/* Form to change PIN */}
-              <form
-                onSubmit={handleSaveNewPin}
-                className="p-4 bg-white rounded-2xl border border-slate-200 space-y-3"
-              >
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                  Đổi mã PIN đăng nhập Admin
-                </h4>
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                    Nhập mã PIN mới:
-                  </label>
-                  <input
-                    type="password"
-                    value={newPin}
-                    onChange={(e) => handlePinChange(e.target.value)}
-                    placeholder="VD: 686868"
-                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
-                  />
-                </div>
-
-                {newPinHash && (
-                  <div className="p-2.5 rounded-xl bg-indigo-50 border border-indigo-100 space-y-1">
-                    <span className="text-[10px] font-semibold text-indigo-700 uppercase">
-                      Mã SHA-256 tương ứng:
-                    </span>
-                    <p className="text-[11px] font-mono text-indigo-900 break-all">
-                      {newPinHash}
-                    </p>
-                  </div>
-                )}
-
-                {securitySuccess && (
-                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>{securitySuccess}</span>
-                  </div>
-                )}
-
-                <div className="flex justify-end pt-1">
-                  <button
-                    type="submit"
-                    disabled={!newPin}
-                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
-                  >
-                    Lưu mã PIN mới
-                  </button>
-                </div>
-              </form>
-            </div>
-          )}
-
-          {/* TAB 4: PERIODS */}
           {activeTab === 'periods' && (
             <div className="space-y-4">
-              <form
-                onSubmit={handleSavePeriod}
-                className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3"
-              >
+              <form onSubmit={handleSavePeriod} className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
                 <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">
                   Tạo thêm kỳ thủ công nếu cần
                 </h4>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                      Tên kỳ:
-                    </label>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Tên kỳ:</label>
                     <input
-                      type="text"
-                      placeholder="VD: Tháng 11/2026"
                       value={periodForm.title}
                       onChange={(e) => setPeriodForm({ ...periodForm, title: e.target.value })}
+                      placeholder="VD: Tháng 11/2026"
                       className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
                     />
                   </div>
-
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
-                      Hạn nộp tiền:
-                    </label>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Hạn nộp tiền:</label>
                     <input
                       type="date"
                       value={periodForm.due_date}
@@ -818,8 +569,7 @@ export default function AdminDashboard({
                     />
                   </div>
                 </div>
-
-                <div className="flex justify-end pt-1">
+                <div className="flex justify-end">
                   <button
                     type="submit"
                     className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm"
@@ -833,7 +583,7 @@ export default function AdminDashboard({
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                   Các kỳ hiện có
                 </h4>
-                {(data.periods || []).map((p) => (
+                {(data?.periods || []).map((p) => (
                   <div
                     key={p.id}
                     className="p-3 bg-white border border-slate-200 rounded-xl flex items-center justify-between"
@@ -844,26 +594,175 @@ export default function AdminDashboard({
                         <span className="text-[11px] text-slate-400 block">Hạn: {p.due_date}</span>
                       )}
                     </div>
-                    <button
-                      onClick={async () => {
-                        if (!confirm(`Xóa kỳ "${p.title}"?\n\nMọi khoản chi và mọi phần đã ghi trong kỳ này bị xóa theo, không phục hồi được.`)) return;
-                        // Signature là (roomId, periodId, adminHash). Gọi thiếu roomId
-                        // thì server trả 401 và hàm rơi vào nhánh local: kỳ biến mất
-                        // trên màn hình nhưng reload thì nó quay lại.
-                        const result = await deletePeriod(roomId, p.id, adminHash);
-                        if (!result.success) {
-                          alert(result.error || 'Không xóa được kỳ.');
-                          return;
-                        }
-                        onDataRefresh();
-                      }}
-                      className="p-1.5 text-slate-400 hover:text-rose-600"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {isOwner && (
+                      <button
+                        onClick={async () => {
+                          if (!confirm(`Xóa kỳ "${p.title}"?\n\nMọi khoản chi và mọi phần đã ghi trong kỳ này bị xóa theo, không phục hồi được.`)) return;
+                          const result = await deletePeriod(roomId, p.id);
+                          if (!result.success) {
+                            alert(result.error || 'Không xóa được kỳ.');
+                            return;
+                          }
+                          await onDataRefresh();
+                        }}
+                        className="p-1.5 text-slate-400 hover:text-rose-600"
+                        title="Xóa kỳ (chỉ chủ phòng)"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {activeTab === 'settings' && isOwner && (
+            <form onSubmit={handleSaveSettings} className="space-y-3.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tên phòng:</label>
+                  <input
+                    value={settingsForm.room_name}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, room_name: e.target.value })}
+                    placeholder="VD: Phòng Trọ 2A"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Ngân hàng thụ hưởng:</label>
+                  <select
+                    value={settingsForm.bank_id}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, bank_id: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
+                  >
+                    {VIETNAM_BANKS.map((b) => (
+                      <option key={b.code} value={b.code}>
+                        {b.name} ({b.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Số tài khoản người thu:</label>
+                  <input
+                    value={settingsForm.account_no}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, account_no: e.target.value })}
+                    placeholder="VD: 0987654321"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tên chủ tài khoản:</label>
+                  <input
+                    value={settingsForm.account_name}
+                    onChange={(e) =>
+                      setSettingsForm({ ...settingsForm, account_name: e.target.value.toUpperCase() })
+                    }
+                    placeholder="VD: NGUYEN VAN A"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tiền tố nội dung chuyển khoản:</label>
+                  <input
+                    value={settingsForm.transfer_prefix}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, transfer_prefix: e.target.value })}
+                    placeholder="VD: TIEN PHONG"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Mã phòng trong nội dung chuyển khoản:
+                  </label>
+                  <input
+                    value={settingsForm.transfer_code}
+                    onChange={(e) =>
+                      setSettingsForm({ ...settingsForm, transfer_code: e.target.value.toUpperCase() })
+                    }
+                    placeholder={defaultTransferCode(roomId)}
+                    maxLength={6}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono uppercase"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Nội dung sẽ là{' '}
+                    <span className="font-mono text-slate-700">
+                      TIEN PHONG {settingsForm.transfer_code} {`<tên bạn>`} {`<kỳ>`}
+                    </span>
+                    . Mã đứng trước tên người nên không bị ngân hàng cắt mất khi nhiều phòng
+                    cùng nhận vào một số tài khoản.
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end pt-2">
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
+                >
+                  Lưu cài đặt
+                </button>
+              </div>
+            </form>
+          )}
+
+          {activeTab === 'security' && isOwner && (
+            <div className="space-y-4">
+              <div className="p-3.5 bg-amber-50 rounded-2xl border border-amber-200 space-y-1.5">
+                <span className="text-xs font-semibold text-amber-900 flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5" /> Mã khôi phục của phòng
+                </span>
+                <p className="text-[11px] text-amber-800">
+                  Chỉ dùng khi chủ phòng mất mật khẩu tài khoản. Không ai xem được mã thật — máy chủ
+                  chỉ giữ bản băm. Đổi mã thì mã cũ lập tức hết hiệu lực.
+                </p>
+              </div>
+
+              <form onSubmit={handleSavePin} className="p-4 bg-white rounded-2xl border border-slate-200 space-y-3">
+                {pinError && (
+                  <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{pinError}</span>
+                  </div>
+                )}
+                {pinSuccess && (
+                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>{pinSuccess}</span>
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Mã mới:</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      value={pinForm.pin}
+                      onChange={(e) => setPinForm({ ...pinForm, pin: e.target.value })}
+                      placeholder="6–12 chữ số"
+                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Nhập lại:</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      value={pinForm.confirm}
+                      onChange={(e) => setPinForm({ ...pinForm, confirm: e.target.value })}
+                      className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
+                  >
+                    Đổi mã khôi phục
+                  </button>
+                </div>
+              </form>
             </div>
           )}
         </div>

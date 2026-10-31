@@ -24,6 +24,7 @@ export default function MemberDetailModal({
   calc,
   members = [],
   sharedExpenses = [],
+  canAct = false,
   onOpenQr,
   onTogglePaid,
   onRecordPayment,
@@ -210,32 +211,40 @@ export default function MemberDetailModal({
 
         {/* Footer actions */}
         <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-1.5 shrink-0">
-          <button
-            onClick={() => onTogglePaid && onTogglePaid(calc)}
-            className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-xl transition-all active:scale-95 ${
-              isPaid
-                ? 'text-emerald-700 bg-emerald-100 hover:bg-emerald-200'
-                : isPartial
-                  ? 'text-amber-700 bg-amber-100 hover:bg-amber-200'
-                  : 'text-rose-600 bg-rose-100 hover:bg-rose-200'
-            }`}
-          >
-            {isPaid ? (
-              <CheckCircle2 className="w-3.5 h-3.5" />
-            ) : isPartial ? (
-              <CircleDot className="w-3.5 h-3.5" />
-            ) : (
-              <XCircle className="w-3.5 h-3.5" />
-            )}
-            <span>{isPaid ? 'Đã nộp (bấm để hủy)' : isPartial ? 'Thu nốt cho đủ' : 'Đánh dấu đã nộp'}</span>
-          </button>
-          <div className="flex items-center gap-1.5">
+          {canAct ? (
             <button
-              onClick={() => onRecordPayment && onRecordPayment(calc)}
-              className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 bg-white border border-emerald-200 rounded-xl hover:bg-emerald-50 transition-all active:scale-95"
+              onClick={() => onTogglePaid && onTogglePaid(calc)}
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-xl transition-all active:scale-95 ${
+                isPaid
+                  ? 'text-emerald-700 bg-emerald-100 hover:bg-emerald-200'
+                  : isPartial
+                    ? 'text-amber-700 bg-amber-100 hover:bg-amber-200'
+                    : 'text-rose-600 bg-rose-100 hover:bg-rose-200'
+              }`}
             >
-              <HandCoins className="w-3.5 h-3.5" /> Thu góp
+              {isPaid ? (
+                <CheckCircle2 className="w-3.5 h-3.5" />
+              ) : isPartial ? (
+                <CircleDot className="w-3.5 h-3.5" />
+              ) : (
+                <XCircle className="w-3.5 h-3.5" />
+              )}
+              <span>{isPaid ? 'Đã nộp (bấm để hủy)' : isPartial ? 'Thu nốt cho đủ' : 'Đánh dấu đã nộp'}</span>
             </button>
+          ) : (
+            <span className="text-[11px] font-semibold text-slate-400">
+              Bạn không có quyền đổi trạng thái nộp
+            </span>
+          )}
+          <div className="flex items-center gap-1.5">
+            {canAct && (
+              <button
+                onClick={() => onRecordPayment && onRecordPayment(calc)}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 bg-white border border-emerald-200 rounded-xl hover:bg-emerald-50 transition-all active:scale-95"
+              >
+                <HandCoins className="w-3.5 h-3.5" /> Thu góp
+              </button>
+            )}
             <button
               onClick={() => onOpenQr && onOpenQr(calc)}
               className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-sm transition-all active:scale-95"

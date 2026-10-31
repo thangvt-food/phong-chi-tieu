@@ -1,59 +1,391 @@
-// API service communicating with Cloudflare Pages Functions & LocalStorage fallback
-import { sha256 } from './crypto';
+// API service: tài khoản + phòng qua Cloudflare Pages Functions.
+// Ghi sổ CHỈ đi qua máy chủ; offline chỉ còn đọc bản cache của phòng đã từng tải.
 
-// Mỗi phòng một namespace riêng trong localStorage. Khóa cũ (một phòng, không có
-// room_id) được đọc và giữ nguyên để không mất dữ liệu offline của người dùng.
-const LEGACY_DATA_KEY = 'phong_chi_tieu_data_v2';
-const LEGACY_HASH_KEY = 'phong_chi_tieu_admin_hash';
-const DEFAULT_ROOM_EXPORT = 'phong-2a';
-
-export const DEFAULT_ROOM = DEFAULT_ROOM_EXPORT;
+export const DEFAULT_ROOM = 'phong-2a';
+const AUTH_KEY = 'pct:auth';
+const LAST_ROOM_KEY = 'pct:lastRoom';
+const dataKey = (roomId) => `pct:data:${roomId}`;
 
 export function roomIdFromUrl(search = (typeof window !== 'undefined' ? window.location.search : '')) {
   const raw = new URLSearchParams(search).get('p');
   return raw && raw.trim() ? raw.trim() : DEFAULT_ROOM;
 }
 
-const dataKey = (roomId) => `pct:data:${roomId}`;
-const hashKey = (roomId) => `pct:hash:${roomId}`;
-const sessionKey = (roomId) => `pct:session:${roomId}`;
-// Máy tạo phòng vào bằng PIN, không có phiên nên server không biết "tôi là ai".
-// /api/rooms/leave cần đúng người, vì thế member_id do chính create-room trả về
-// phải được nhớ lại - đây là dấu vết duy nhất, không phải credential.
-const memberKey = (roomId) => `pct:member:${roomId}`;
+// ---- Phiên tài khoản ----
 
-const INITIAL_DATA = {
-  settings: {
-    room_name: 'Phòng Trọ 2A',
-    bank_id: 'MB',
-    account_no: '0987654321',
-    account_name: 'NGUYEN VAN QUAN TRI',
-    transfer_prefix: 'TIEN PHONG',
-  },
-  members: [
-    { id: 'mem_1', name: 'Nguyễn Văn An', nickname: 'An', phone: '0901234561', is_active: 1 },
-    { id: 'mem_2', name: 'Trần Thị Bình', nickname: 'Bin', phone: '0901234562', is_active: 1 },
-    { id: 'mem_3', name: 'Lê Hoàng Cường', nickname: 'Cường', phone: '0901234563', is_active: 1 },
-    { id: 'mem_4', name: 'Phạm Minh Đức', nickname: 'Đức', phone: '0901234564', is_active: 1 },
-  ],
-  periods: [
-    { id: '2026-10', title: 'Tháng 10/2026', due_date: '2026-10-20', status: 'open' },
-  ],
-  expenses: [
-    { id: 'exp_1', period_id: '2026-10', expense_date: '2026-10-01', category: 'phong', title: 'Tiền thuê phòng', amount: 4800000, note: 'Tiền phòng cố định' },
-    { id: 'exp_2', period_id: '2026-10', expense_date: '2026-10-05', category: 'dien', title: 'Tiền điện', amount: 620000, note: '' },
-    { id: 'exp_3', period_id: '2026-10', expense_date: '2026-10-08', category: 'nuoc_uong', title: 'Nước uống bình', amount: 100000, quantity: 4, unit_price: 25000, note: '4 thùng x 25k' },
-    { id: 'exp_4', period_id: '2026-10', expense_date: '2026-10-10', category: 'mang', title: 'Internet Viettel', amount: 220000, note: 'Cước cố định' },
-    { id: 'exp_5', period_id: '2026-10', expense_date: '2026-10-11', category: 'rac', title: 'Tiền rác', amount: 60000, note: 'Vệ sinh chung' },
-    { id: 'exp_6', period_id: '2026-10', expense_date: '2026-10-12', category: 'rieng', title: 'Mua đồ ăn riêng cho Bin', amount: 50000, target_member_id: 'mem_2', note: 'Bin nhờ mua chưa gửi tiền' },
-  ],
-  member_shares: [
-    { period_id: '2026-10', member_id: 'mem_1', is_paid: 1, paid_at: '2026-10-12T09:30:00Z' },
-    { period_id: '2026-10', member_id: 'mem_2', is_paid: 0, paid_at: null },
-    { period_id: '2026-10', member_id: 'mem_3', is_paid: 1, paid_at: '2026-10-12T14:15:00Z' },
-    { period_id: '2026-10', member_id: 'mem_4', is_paid: 0, paid_at: null },
-  ],
-};
+export function getAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_KEY);
+    if (!raw) return null;
+    const auth = JSON.parse(raw);
+    if (!auth?.token) return null;
+    if (auth.expires_at && new Date(auth.expires_at).getTime() <= Date.now()) {
+      localStorage.removeItem(AUTH_KEY);
+      return null;
+    }
+    return auth;
+  } catch (e) {
+    return null;
+  }
+}
+
+export function setAuth({ token, expires_at, user }) {
+  if (!token) {
+    localStorage.removeItem(AUTH_KEY);
+    return;
+  }
+  const previous = getAuth();
+  localStorage.setItem(
+    AUTH_KEY,
+    JSON.stringify({ token, expires_at, user: user || previous?.user || null })
+  );
+}
+
+export function clearAuth() {
+  localStorage.removeItem(AUTH_KEY);
+}
+
+export function getStoredUser() {
+  return getAuth()?.user || null;
+}
+
+export function getLastRoomId() {
+  return localStorage.getItem(LAST_ROOM_KEY) || '';
+}
+
+export function setLastRoomId(roomId) {
+  if (roomId) localStorage.setItem(LAST_ROOM_KEY, roomId);
+}
+
+// Bản 2 dùng PIN theo phòng; xoá một lần để khỏi đọc nhầm credential cũ.
+export function clearLegacyStorage() {
+  try {
+    const remove = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      if (
+        key.startsWith('pct:hash:') ||
+        key.startsWith('pct:session:') ||
+        key.startsWith('pct:member:') ||
+        key === 'phong_chi_tieu_admin_hash' ||
+        key === 'phong_chi_tieu_data_v2'
+      ) {
+        remove.push(key);
+      }
+    }
+    remove.forEach((key) => localStorage.removeItem(key));
+  } catch (e) {
+    // localStorage bị chặn thì bỏ qua
+  }
+}
+
+// ---- Gọi máy chủ ----
+
+async function request(path, { method = 'GET', body, roomId, auth = true } = {}) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const token = auth ? getAuth()?.token : null;
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let url = path;
+  if (roomId) url += (url.includes('?') ? '&' : '?') + `p=${encodeURIComponent(roomId)}`;
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    return { res: null, data: { error: 'Không gọi được máy chủ (offline?).' }, offline: true };
+  }
+  const data = await res.json().catch(() => ({}));
+  // Chỉ phiên chết mới xoá token; 401 "sai mật khẩu" ở login không có needs_auth.
+  if (res.status === 401 && data?.needs_auth) clearAuth();
+  return { res, data };
+}
+
+async function mutate(path, { roomId, body, method = 'POST' } = {}) {
+  const { res, data, offline } = await request(path, { method, body, roomId });
+  if (offline) {
+    return { success: false, offline: true, error: 'Không gọi được máy chủ. Thao tác chưa được lưu.' };
+  }
+  if (res.status === 401) {
+    return { success: false, unauthorized: true, error: data.error || 'Phiên đã hết hạn, đăng nhập lại.' };
+  }
+  if (!res.ok) {
+    return { success: false, status: res.status, error: data.error || `Máy chủ trả ${res.status}.` };
+  }
+  return { success: true, ...data };
+}
+
+// ---- Tài khoản ----
+
+export async function authRegister({ username, password, displayName }) {
+  const { res, data, offline } = await request('/api/auth/register', {
+    method: 'POST',
+    auth: false,
+    body: { username, password, display_name: displayName || '' },
+  });
+  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
+  if (!res.ok) return { success: false, error: data.error || 'Không tạo được tài khoản.', field: data.field };
+  setAuth({ token: data.token, expires_at: data.expires_at, user: data.user });
+  return { success: true, user: data.user };
+}
+
+export async function authLogin({ username, password }) {
+  const { res, data, offline } = await request('/api/auth/login', {
+    method: 'POST',
+    auth: false,
+    body: { username, password },
+  });
+  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
+  if (!res.ok) {
+    return {
+      success: false,
+      error: data.error || 'Sai tên đăng nhập hoặc mật khẩu.',
+      locked: data.locked,
+    };
+  }
+  setAuth({ token: data.token, expires_at: data.expires_at, user: data.user });
+  return { success: true, user: data.user };
+}
+
+export async function authLogout() {
+  await request('/api/auth/logout', { method: 'POST' });
+  clearAuth();
+}
+
+export async function authMe() {
+  const { res, data, offline } = await request('/api/auth/me');
+  if (offline) return { offline: true, error: 'Không gọi được máy chủ (offline?).' };
+  if (res.status === 401) {
+    clearAuth();
+    return { needsAuth: true };
+  }
+  if (!res.ok) return { error: data.error || `Không tải được tài khoản (HTTP ${res.status}).` };
+  const auth = getAuth();
+  if (auth) setAuth({ ...auth, user: data.user });
+  return { user: data.user, rooms: data.rooms || [] };
+}
+
+export async function changePassword(oldPassword, newPassword) {
+  const { res, data, offline } = await request('/api/auth/change-password', {
+    method: 'POST',
+    body: { old_password: oldPassword, new_password: newPassword },
+  });
+  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
+  if (!res.ok) return { success: false, error: data.error || 'Không đổi được mật khẩu.' };
+  return { success: true };
+}
+
+export async function previewInvite(token) {
+  const { res, data, offline } = await request(`/api/invites/${encodeURIComponent(token)}`, { auth: false });
+  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
+  if (!res.ok) return { success: false, error: data.error || 'Link mời không còn hiệu lực.' };
+  return { success: true, ...data };
+}
+
+export async function claimInvite(token) {
+  return mutate('/api/invites/claim', { body: { token } });
+}
+
+export async function recoverOwner({ roomId, pin, newPin, username, password, displayName }) {
+  const body = { pin, new_pin: newPin };
+  if (username) body.username = username;
+  if (password) body.password = password;
+  if (displayName) body.display_name = displayName;
+  const { res, data, offline } = await request('/api/rooms/recover-owner', {
+    method: 'POST',
+    roomId,
+    body,
+  });
+  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
+  if (!res.ok) {
+    return {
+      success: false,
+      status: res.status,
+      error: data.error || 'Không khôi phục được quyền chủ phòng.',
+      field: data.field,
+    };
+  }
+  setAuth({ token: data.token, expires_at: data.expires_at, user: data.user });
+  return {
+    success: true,
+    room_id: data.room_id,
+    room_name: data.room_name,
+    member_id: data.member_id,
+    user: data.user,
+  };
+}
+
+// ---- Đọc dữ liệu phòng ----
+
+function readCachedRoom(roomId) {
+  try {
+    const raw = localStorage.getItem(dataKey(roomId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeCachedRoom(roomId, data) {
+  try {
+    localStorage.setItem(dataKey(roomId), JSON.stringify(data));
+  } catch (e) {
+    // đầy quota thì thôi, chỉ ảnh hưởng chế độ offline
+  }
+}
+
+export function normalizeRoom(blob, roomId = DEFAULT_ROOM) {
+  const src = blob && typeof blob === 'object' ? blob : {};
+  const members = Array.isArray(src.members) ? src.members : [];
+  return {
+    room_id: src.room_id || roomId,
+    room_name: src.room_name || (src.settings && src.settings.room_name) || roomId,
+    owner_member_id: src.owner_member_id || null,
+    me: src.me || null,
+    settings: { ...(src.settings || {}) },
+    members,
+    periods: Array.isArray(src.periods) ? src.periods : [],
+    expenses: Array.isArray(src.expenses) ? src.expenses : [],
+    member_shares: Array.isArray(src.member_shares) ? src.member_shares : [],
+  };
+}
+
+// source: 'd1' | 'offline' | 'offline_empty' | 'need_auth' | 'forbidden' | 'need_room' | 'error'
+export async function fetchRoomData(roomId) {
+  const { res, data, offline } = await request('/api/data', { roomId });
+  if (offline) {
+    const cached = readCachedRoom(roomId);
+    return {
+      ...normalizeRoom(cached, roomId),
+      source: cached ? 'offline' : 'offline_empty',
+      offline: true,
+    };
+  }
+  if (res.status === 401) {
+    return { ...normalizeRoom(null, roomId), source: 'need_auth', status: 401 };
+  }
+  if (res.status === 403) {
+    return {
+      ...normalizeRoom(null, roomId),
+      source: 'forbidden',
+      status: 403,
+      error: data.error || 'Bạn không còn quyền vào phòng này.',
+    };
+  }
+  if (res.status === 404) {
+    return { ...normalizeRoom(null, roomId), source: 'need_room', status: 404 };
+  }
+  if (!res.ok) {
+    return {
+      ...normalizeRoom(null, roomId),
+      source: 'error',
+      status: res.status,
+      error: data.error || `Máy chủ trả ${res.status}.`,
+    };
+  }
+  writeCachedRoom(roomId, data);
+  return { ...normalizeRoom(data, roomId), source: 'd1' };
+}
+
+// ---- Ghi sổ (cần tài khoản + quyền; server là nguồn sự thật) ----
+
+export async function createRoom({ name, pin, ownerName }) {
+  const result = await mutate('/api/rooms', {
+    body: { name, pin, owner_name: ownerName || '' },
+  });
+  if (!result.success) return result;
+  return { success: true, room_id: result.room?.room_id, room: result.room };
+}
+
+export async function updateSettings(roomId, settings) {
+  return mutate('/api/admin/settings', { roomId, body: settings });
+}
+
+export async function setRoomPin(roomId, newPin) {
+  return mutate('/api/admin/pin', { roomId, body: { new_pin: newPin } });
+}
+
+export async function saveMember(roomId, member) {
+  return mutate('/api/admin/members', { roomId, body: member });
+}
+
+export async function deactivateMember(roomId, memberId) {
+  return mutate(`/api/admin/members/${encodeURIComponent(memberId)}/deactivate`, { roomId });
+}
+
+export async function reactivateMember(roomId, memberId) {
+  return mutate(`/api/admin/members/${encodeURIComponent(memberId)}/reactivate`, { roomId });
+}
+
+export async function setMemberRole(roomId, memberId, role) {
+  return mutate(`/api/admin/members/${encodeURIComponent(memberId)}/role`, { roomId, body: { role } });
+}
+
+export async function unlinkMember(roomId, memberId) {
+  return mutate(`/api/admin/members/${encodeURIComponent(memberId)}/unlink`, { roomId });
+}
+
+export async function savePeriod(roomId, period) {
+  return mutate('/api/admin/periods', { roomId, body: period });
+}
+
+export async function deletePeriod(roomId, periodId) {
+  return mutate(`/api/admin/periods/${encodeURIComponent(periodId)}`, { roomId, method: 'DELETE' });
+}
+
+export async function saveExpense(roomId, expense) {
+  const dateStr = expense.expense_date || new Date().toISOString().split('T')[0];
+  const [y, m] = dateStr.split('-');
+  const periodId = expense.period_id || `${y}-${m}`;
+  const result = await mutate('/api/admin/expenses', {
+    roomId,
+    body: { ...expense, expense_date: dateStr, period_id: periodId },
+  });
+  if (result.success) return { ...result, period_id: result.period_id || periodId };
+  return result;
+}
+
+export async function deleteExpense(roomId, expenseId) {
+  return mutate(`/api/admin/expenses/${encodeURIComponent(expenseId)}`, { roomId, method: 'DELETE' });
+}
+
+export async function toggleSharePaid(roomId, periodId, memberId, isPaid, paidAmount) {
+  const body = { period_id: periodId, member_id: memberId, is_paid: isPaid };
+  if (paidAmount !== undefined && paidAmount !== null) {
+    body.paid_amount = Math.max(0, parseInt(paidAmount, 10) || 0);
+  }
+  return mutate('/api/admin/toggle-share-paid', { roomId, body });
+}
+
+export async function memberTogglePaid(roomId, { period_id, is_paid, paid_amount }) {
+  const body = { period_id, is_paid };
+  if (paid_amount !== undefined && paid_amount !== null) body.paid_amount = paid_amount;
+  return mutate('/api/member/toggle-share-paid', { roomId, body });
+}
+
+export async function leaveRoom(roomId) {
+  return mutate('/api/rooms/leave', { roomId });
+}
+
+export async function createInvite(roomId, memberId, { ttlMin, role = 'member' } = {}) {
+  const body = { member_id: memberId, role };
+  if (ttlMin) body.ttl_min = ttlMin;
+  const result = await mutate('/api/admin/invites', { roomId, body });
+  if (!result.success) return result;
+  return { ...result, linkToken: result.token };
+}
+
+export async function transferOwner(roomId, memberId) {
+  return mutate('/api/admin/transfer-owner', { roomId, body: { member_id: memberId } });
+}
+
+// ---- Mã phòng cho nội dung chuyển khoản ----
 
 // Mã phòng đứng trước tên người trong nội dung chuyển khoản. Napas/VietQR cắt nội
 // dung từ đuôi khi quá dài, nên mã phải ở đầu mới sống sót.
@@ -61,600 +393,6 @@ export function defaultTransferCode(roomId) {
   const tokens = String(roomId || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const meaningful = tokens.filter((t) => !['phong', 'tro', 'nha', 'nhatro', 'phongtro'].includes(t));
   return (meaningful.length ? meaningful : tokens).join('').toUpperCase().slice(0, 6);
-}
-
-// Phòng khác phòng mặc định không có vở kịch mẫu: tạo phòng là để dùng thật.
-function initialDataFor(roomId) {
-  if (roomId === DEFAULT_ROOM) return INITIAL_DATA;
-  return {
-    settings: { room_name: roomId, transfer_prefix: 'TIEN PHONG' },
-    members: [],
-    periods: [],
-    expenses: [],
-    member_shares: [],
-  };
-}
-
-// Một chỗ duy nhất để hai nguồn (D1 flat / localStorage) ra cùng một shape.
-export function normalizeRoom(blob, roomId = DEFAULT_ROOM) {
-  const src = blob && typeof blob === 'object' ? blob : {};
-  const members = Array.isArray(src.members) ? src.members : [];
-  const shares = Array.isArray(src.member_shares) ? src.member_shares : [];
-  return {
-    room_id: src.room_id || roomId,
-    room_name: src.room_name || (src.settings && src.settings.room_name) || roomId,
-    owner_member_id: src.owner_member_id || null,
-    settings: { ...(src.settings || {}) },
-    members,
-    periods: Array.isArray(src.periods) ? src.periods : [],
-    expenses: Array.isArray(src.expenses) ? src.expenses : [],
-    member_shares: shares,
-  };
-}
-
-function getLocalData(roomId) {
-  try {
-    const raw = localStorage.getItem(dataKey(roomId)) || (roomId === DEFAULT_ROOM ? localStorage.getItem(LEGACY_DATA_KEY) : null);
-    if (!raw) {
-      const seed = initialDataFor(roomId);
-      localStorage.setItem(dataKey(roomId), JSON.stringify(seed));
-      return seed;
-    }
-    return JSON.parse(raw);
-  } catch (e) {
-    return initialDataFor(roomId);
-  }
-}
-
-function saveLocalData(roomId, data) {
-  try {
-    localStorage.setItem(dataKey(roomId), JSON.stringify(data));
-  } catch (e) {
-    console.error('Failed to save to local storage', e);
-  }
-}
-
-export function getStoredAdminHash(roomId) {
-  return (
-    localStorage.getItem(hashKey(roomId)) ||
-    (roomId === DEFAULT_ROOM ? localStorage.getItem(LEGACY_HASH_KEY) : null) ||
-    ''
-  );
-}
-
-export function setStoredAdminHash(roomId, hash) {
-  localStorage.setItem(hashKey(roomId), hash);
-}
-
-export function getStoredSession(roomId) {
-  try {
-    const raw = localStorage.getItem(sessionKey(roomId));
-    if (!raw) return null;
-    const s = JSON.parse(raw);
-    if (!s?.token) return null;
-    if (s.expires_at && new Date(s.expires_at).getTime() <= Date.now()) return null;
-    return s;
-  } catch (e) {
-    return null;
-  }
-}
-
-export function setStoredSession(roomId, session) {
-  if (!session) {
-    localStorage.removeItem(sessionKey(roomId));
-    return;
-  }
-  localStorage.setItem(sessionKey(roomId), JSON.stringify(session));
-}
-
-export function getStoredMember(roomId) {
-  return localStorage.getItem(memberKey(roomId)) || null;
-}
-
-export function setStoredMember(roomId, memberId) {
-  if (!memberId) localStorage.removeItem(memberKey(roomId));
-  else localStorage.setItem(memberKey(roomId), memberId);
-}
-
-// Vở trống - dùng khi "gỡ khỏi máy này". KHÁC initialDataFor(): hàm đó seed 4 người
-// mẫu + kỳ 2026-10 cho phòng kế thừa, ghi vào là phòng hiện ra với tên người lạ.
-function emptyLedger() {
-  return { settings: {}, members: [], periods: [], expenses: [], member_shares: [] };
-}
-
-// "Gỡ khỏi máy này": quên PIN + phiên + bản offline của một phòng, KHÔNG nói với
-// server. Quyền vào phòng thật vẫn còn ở thiết bị khác và với ai biết mã phòng
-// (GET /api/data không cần PIN - đó là thiết kế đã chốt, xem README).
-// Muốn mất quyền thật thì dùng leaveRoom().
-export function removeRoomFromDevice(roomId) {
-  localStorage.removeItem(hashKey(roomId));
-  localStorage.removeItem(sessionKey(roomId));
-  localStorage.removeItem(memberKey(roomId));
-  localStorage.setItem(dataKey(roomId), JSON.stringify(emptyLedger()));
-  // Phòng kế thừa còn hai khóa không có tiền tố pct:: - listStoredRooms đọc
-  // LEGACY_HASH_KEY nên quên không xóa là phòng tự nhảy lại vào menu.
-  if (roomId === DEFAULT_ROOM) {
-    localStorage.removeItem(LEGACY_HASH_KEY);
-    localStorage.removeItem(LEGACY_DATA_KEY);
-  }
-}
-
-// Những phòng thiết bị này đã từng vào (để Header liệt kê, không gọi server).
-// Hai dấu vết hợp lệ: một phiên member (qua link mời) hoặc một hash PIN admin
-// (phòng tự tạo / đã mở Cài đặt). Thiếu hash cũng tính là "phòng của tôi" —
-// người tạo phòng chưa chắc đã bấm vào link mời nào.
-export function listStoredRooms() {
-  const byRoom = new Map();
-  for (let i = 0; i < localStorage.length; i += 1) {
-    const key = localStorage.key(i);
-    if (!key) continue;
-    if (key.startsWith('pct:session:')) {
-      const roomId = key.slice('pct:session:'.length);
-      const session = getStoredSession(roomId);
-      if (session) {
-        byRoom.set(roomId, {
-          roomId,
-          member_id: session.member_id,
-          member_name: session.member_name || '',
-          role: session.role,
-        });
-      }
-    } else if (key.startsWith('pct:hash:')) {
-      const roomId = key.slice('pct:hash:'.length);
-      if (localStorage.getItem(key) && !byRoom.has(roomId)) {
-        byRoom.set(roomId, {
-          roomId,
-          member_id: getStoredMember(roomId),
-          member_name: '',
-          role: 'admin',
-        });
-      }
-    }
-  }
-  if (localStorage.getItem(LEGACY_HASH_KEY) && !byRoom.has(DEFAULT_ROOM)) {
-    byRoom.set(DEFAULT_ROOM, { roomId: DEFAULT_ROOM, member_id: null, member_name: '', role: 'admin' });
-  }
-  return Array.from(byRoom.values());
-}
-
-const qs = (roomId) => `p=${encodeURIComponent(roomId)}`;
-
-async function postJson(path, body, { roomId, adminHash, session } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (adminHash) headers['x-admin-hash'] = adminHash;
-  if (session) headers['Authorization'] = `Bearer ${session}`;
-  const url = path.includes('?') ? `${path}&${qs(roomId)}` : `${path}?${qs(roomId)}`;
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  const data = await res.json().catch(() => ({}));
-  return { res, data };
-}
-
-// Fetch all public data của MỘT phòng.
-// source: 'd1' | 'local' | 'need_room' (phòng không tồn tại / chưa có phiên)
-export async function fetchRoomData(roomId) {
-  try {
-    const res = await fetch(`/api/data?${qs(roomId)}`);
-    if (res.status === 404 || res.status === 401) {
-      return { ...normalizeRoom(null, roomId), source: 'need_room', status: res.status };
-    }
-    if (res.ok) {
-      const data = await res.json();
-      if (data.hasD1) {
-        return { ...normalizeRoom(data, roomId), source: 'd1' };
-      }
-    }
-  } catch (err) {
-    // offline ->LocalStorage
-  }
-  return { ...normalizeRoom(getLocalData(roomId), roomId), source: 'local' };
-}
-
-// Verify Admin PIN của từng phòng
-export async function verifyAdminPin(roomId, pin) {
-  const hash = await sha256(pin);
-  try {
-    const { res, data } = await postJson('/api/admin/verify', { pin_hash: hash }, { roomId });
-    if (res.ok && data.valid) return { valid: true, hash };
-    if (res.ok && !data.valid) {
-      // Server nói không đúng -> không cho qua bằng bản local.
-      return { valid: false, hash };
-    }
-  } catch (e) {
-    // offline: chỉ còn cách so với hash đã lưu
-  }
-  const currentHash = getStoredAdminHash(roomId) || (await sha256('123456'));
-  const valid = hash.toLowerCase() === currentHash.toLowerCase();
-  return { valid, hash };
-}
-
-// ---- Tạo phòng / vào phòng bằng link ----
-
-export async function createRoom({ name, pin, ownerName }) {
-  const pin_hash = await sha256(pin);
-  try {
-    const res = await fetch('/api/rooms', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, pin_hash, owner_name: ownerName || '' }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { success: false, error: data.error || 'Không tạo được phòng' };
-    setStoredAdminHash(data.room_id, pin_hash);
-    setStoredMember(data.room_id, data.member_id || null);
-    return { success: true, room_id: data.room_id, name: data.name };
-  } catch (e) {
-    return { success: false, error: 'Không gọi được máy chủ (offline?).' };
-  }
-}
-
-export async function joinWithToken(token) {
-  try {
-    const res = await fetch('/api/join', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { success: false, error: data.error || 'Link mời không còn hợp lệ.' };
-    // member_name để lần sau mở app còn biết "tôi là ai trong phòng này".
-    setStoredSession(data.room_id, { ...data.session, member_name: data.member_name || '' });
-    return { success: true, room_id: data.room_id, room_name: data.room_name, session: data.session };
-  } catch (e) {
-    return { success: false, error: 'Không gọi được máy chủ (offline?).' };
-  }
-}
-
-// Member tự đánh dấu đã nộp - không cần PIN admin, server lấy member_id từ phiên.
-export async function memberTogglePaid(roomId, { period_id, is_paid, paid_amount }) {
-  const session = getStoredSession(roomId);
-  if (!session) return { success: false, needInvite: true };
-  const body = { period_id, is_paid };
-  if (paid_amount !== undefined && paid_amount !== null) body.paid_amount = paid_amount;
-  try {
-    const { res, data } = await postJson('/api/member/toggle-share-paid', body, { roomId, session: session.token });
-    if (res.status === 401) {
-      setStoredSession(roomId, null);
-      return { success: false, needInvite: true };
-    }
-    if (!res.ok) return { success: false, error: data.error || 'Không lưu được' };
-  } catch (e) {
-    // offline -> chỉ ghi local
-  }
-  const current = getLocalData(roomId);
-  const idx = current.member_shares.findIndex((s) => s.period_id === period_id && s.member_id === session.member_id);
-  const record = {
-    period_id,
-    member_id: session.member_id,
-    is_paid: is_paid ? 1 : 0,
-    paid_at: is_paid ? new Date().toISOString() : null,
-    paid_amount: paid_amount !== undefined && paid_amount !== null
-      ? Math.max(0, parseInt(paid_amount) || 0)
-      : (idx >= 0 ? current.member_shares[idx].paid_amount : 0),
-  };
-  if (idx >= 0) current.member_shares[idx] = { ...current.member_shares[idx], ...record };
-  else current.member_shares.push(record);
-  saveLocalData(roomId, current);
-  return { success: true, member_id: session.member_id };
-}
-
-// role: 'viewer' | 'member' | 'manager' - quyền đi từ link, người mở link không tự chọn được.
-// session thay cho adminHash khi người gọi là manager của phòng (không cầm PIN).
-export async function createInvite(roomId, memberId, { ttlMin = 15, uses = 1, role = 'member' } = {}, adminHash, session) {
-  const { res, data } = await postJson(
-    '/api/admin/invites',
-    { member_id: memberId, ttl_min: ttlMin, uses, role },
-    { roomId, adminHash, session }
-  );
-  if (res.status === 401) return { success: false, unauthorized: true };
-  if (!res.ok) return { success: false, error: data.error || 'Không tạo được link mời' };
-  return { success: true, token: data.token, role: data.role, expires_at: data.expires_at, room_id: data.room_id };
-}
-
-export async function revokeMemberSession(roomId, memberId, adminHash, session) {
-  const { res, data } = await postJson('/api/admin/revoke', { member_id: memberId }, { roomId, adminHash, session });
-  if (res.status === 401) return { success: false, unauthorized: true };
-  if (!res.ok) return { success: false, error: data.error || 'Không thu hồi được phiên' };
-  return { success: true, revoked: data.revoked };
-}
-
-// Rời phòng THẬT (server): nhân vật ở lại trong sổ với is_active=0, phần tiền đã ghi
-// không đổi, nhưng mọi phiên và mọi link mời của họ bị thu ở mọi thiết bị.
-// Có session thì server lấy member_id từ session; không có thì phải dùng PIN + member_id.
-export async function leaveRoom(roomId, { adminHash, member_id } = {}) {
-  const session = getStoredSession(roomId);
-  const body = session ? {} : { member_id };
-  const { res, data } = await postJson('/api/rooms/leave', body, {
-    roomId,
-    adminHash,
-    session: session?.token,
-  });
-  if (!res.ok) return { success: false, error: data.error || 'Không rời phòng được' };
-  removeRoomFromDevice(roomId);
-  return { success: true, room_id: data.room_id };
-}
-
-// Giao phòng: bắt buộc trước khi chủ phòng rời đi, nếu không guard "chủ phòng không
-// tự rời" biến thành bẫy - phòng có chủ thì vĩnh viễn không bỏ được.
-export async function transferOwner(roomId, memberId, adminHash) {
-  const { res, data } = await postJson('/api/admin/transfer-owner', { member_id: memberId }, { roomId, adminHash });
-  if (res.status === 401) return { success: false, unauthorized: true };
-  if (!res.ok) return { success: false, error: data.error || 'Không giao phòng được' };
-  return { success: true, owner_member_id: data.owner_member_id };
-}
-
-// Kiểm tra phiên còn sống không + mình là ai trong phòng này. Server là nguồn sự
-// thật: chủ phòng đã đá thì lần mở phòng kế tiếp phải biết ngay, không đợi tới lúc
-// bấm "đã nộp" mới thấy lỗi.
-export async function fetchMe(roomId) {
-  const session = getStoredSession(roomId);
-  if (!session) return { none: true };
-  try {
-    const res = await fetch(`/api/me?${qs(roomId)}`, { headers: { Authorization: `Bearer ${session.token}` } });
-    if (res.status === 401 || res.status === 403) {
-      setStoredSession(roomId, null);
-      const data = await res.json().catch(() => ({}));
-      return { needInvite: true, error: data.error || 'Phiên đã hết hạn hoặc bị thu hồi.' };
-    }
-    if (!res.ok) return { error: 'Không kiểm tra được phiên (máy chủ trả ' + res.status + ').' };
-    const data = await res.json();
-    return { member_id: data.member_id, role: data.role, member: data.member };
-  } catch (e) {
-    return { offline: true };
-  }
-}
-
-// Update Room Settings
-export async function updateSettings(roomId, settings, adminHash) {
-  try {
-    const res = await fetch(`/api/admin/settings?${qs(roomId)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-hash': adminHash,
-      },
-      body: JSON.stringify(settings),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.success) return true;
-    }
-  } catch (e) {}
-
-  const current = getLocalData(roomId);
-  current.settings = { ...current.settings, ...settings };
-  saveLocalData(roomId, current);
-  return true;
-}
-
-// Save or Update Member
-export async function saveMember(roomId, member, adminHash) {
-  try {
-    const res = await fetch(`/api/admin/members?${qs(roomId)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-hash': adminHash,
-      },
-      body: JSON.stringify(member),
-    });
-    if (res.ok) return true;
-  } catch (e) {}
-
-  const current = getLocalData(roomId);
-  const id = member.id || 'mem_' + Date.now();
-  const idx = current.members.findIndex((m) => m.id === id);
-  if (idx >= 0) {
-    current.members[idx] = { ...current.members[idx], ...member };
-  } else {
-    current.members.push({ ...member, id, is_active: 1 });
-  }
-  saveLocalData(roomId, current);
-  return true;
-}
-
-// Ngưng hoạt động một thành viên (server đổi tên hành vi: không còn xóa dòng).
-// Trả về object thay vì `true` để caller hiển thị được các lỗi 409 mới:
-// "chủ phòng không rời được khi chưa giao phòng", "phòng cần còn một người".
-// Chỉ ghi local khi KHÔNG nối được máy chủ; 4xx là câu trả lời thật, phải báo lại
-// chứ không được âm thầm xóa trong bộ nhớ rồi nói "xong".
-export async function deleteMember(roomId, memberId, adminHash) {
-  let res = null;
-  try {
-    res = await fetch(`/api/admin/members/${memberId}?${qs(roomId)}`, {
-      method: 'DELETE',
-      headers: { 'x-admin-hash': adminHash },
-    });
-  } catch (e) {
-    res = null;
-  }
-  if (res && !res.ok) {
-    const data = await res.json().catch(() => ({}));
-    return { success: false, status: res.status, error: data.error || 'Không ngưng hoạt động được.' };
-  }
-
-  const current = getLocalData(roomId);
-  current.members = (current.members || []).map((m) => (m.id === memberId ? { ...m, is_active: 0 } : m));
-  // member_shares và expenses.split_config giữ nguyên: đó là hóa đơn đã xảy ra.
-  saveLocalData(roomId, current);
-  return { success: true, deactivated: true };
-}
-
-// Save or Update Period
-export async function savePeriod(roomId, period, adminHash) {
-  try {
-    const res = await fetch(`/api/admin/periods?${qs(roomId)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-hash': adminHash,
-      },
-      body: JSON.stringify(period),
-    });
-    if (res.ok) return true;
-  } catch (e) {}
-
-  const current = getLocalData(roomId);
-  const id = period.id || 'period_' + Date.now();
-  const idx = current.periods.findIndex((p) => p.id === id);
-  if (idx >= 0) {
-    current.periods[idx] = { ...current.periods[idx], ...period };
-  } else {
-    current.periods.unshift({ ...period, id, status: period.status || 'open' });
-  }
-  saveLocalData(roomId, current);
-  return true;
-}
-
-// Xóa một kỳ kèm mọi khoản và mọi phần của nó. Trả về object để caller báo được lỗi
-// thật: trước đây mọi 4xx rơi xuống nhánh local và hàm always `true`, nên nút
-// "Xóa kỳ" trông như thành công nhưng reload thì kỳ vẫn còn.
-export async function deletePeriod(roomId, periodId, adminHash) {
-  let res = null;
-  try {
-    res = await fetch(`/api/admin/periods/${periodId}?${qs(roomId)}`, {
-      method: 'DELETE',
-      headers: { 'x-admin-hash': adminHash },
-    });
-  } catch (e) {
-    res = null;
-  }
-  if (res && !res.ok) {
-    const data = await res.json().catch(() => ({}));
-    return { success: false, status: res.status, error: data.error || `Không xóa được kỳ (HTTP ${res.status}).` };
-  }
-
-  const current = getLocalData(roomId);
-  current.periods = current.periods.filter((p) => p.id !== periodId);
-  current.expenses = current.expenses.filter((e) => e.period_id !== periodId);
-  current.member_shares = current.member_shares.filter((s) => s.period_id !== periodId);
-  saveLocalData(roomId, current);
-  return { success: true };
-}
-
-// Save or Update Expense
-export async function saveExpense(roomId, expense, adminHash) {
-  const dateStr = expense.expense_date || new Date().toISOString().split('T')[0];
-  const [y, m] = dateStr.split('-');
-  const periodId = expense.period_id || `${y}-${m}`;
-
-  try {
-    const res = await fetch(`/api/admin/expenses?${qs(roomId)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-hash': adminHash,
-      },
-      body: JSON.stringify({
-        ...expense,
-        expense_date: dateStr,
-        period_id: periodId,
-      }),
-    });
-    if (res.ok) {
-      const data = await res.json().catch(() => ({}));
-      return { success: true, period_id: periodId, id: data.id };
-    }
-    const errData = await res.json().catch(() => ({}));
-    if (res.status === 401) {
-      return { success: false, unauthorized: true, error: 'Mã PIN Admin chưa chính xác!' };
-    }
-    return { success: false, error: errData.error || 'Lỗi máy chủ khi lưu chi tiêu' };
-  } catch (e) {
-    // Fallback if offline
-  }
-
-  // Fallback Local
-  const current = getLocalData(roomId);
-  const id = expense.id || 'exp_' + Date.now();
-
-  // Ensure period in local
-  if (!current.periods.some((p) => p.id === periodId)) {
-    current.periods.unshift({
-      id: periodId,
-      title: `Tháng ${m}/${y}`,
-      due_date: '',
-      status: 'open',
-    });
-  }
-
-  const idx = current.expenses.findIndex((e) => e.id === id);
-  const updatedExp = {
-    ...expense,
-    id,
-    period_id: periodId,
-    expense_date: dateStr,
-  };
-
-  if (idx >= 0) {
-    current.expenses[idx] = updatedExp;
-  } else {
-    current.expenses.unshift(updatedExp);
-  }
-  saveLocalData(roomId, current);
-  return { success: true, period_id: periodId, id };
-}
-
-// Delete Expense
-export async function deleteExpense(roomId, expenseId, adminHash) {
-  try {
-    const res = await fetch(`/api/admin/expenses/${expenseId}?${qs(roomId)}`, {
-      method: 'DELETE',
-      headers: { 'x-admin-hash': adminHash },
-    });
-    if (res.ok) return true;
-  } catch (e) {}
-
-  const current = getLocalData(roomId);
-  current.expenses = current.expenses.filter((e) => e.id !== expenseId);
-  saveLocalData(roomId, current);
-  return true;
-}
-
-// Toggle Payment Status (hỗ trợ trả góp từng phần qua paidAmount)
-// - paidAmount undefined: giữ nguyên số đã trả cũ, chỉ đổi cờ is_paid (tương thích cũ)
-// - paidAmount number: ghi đè số tiền thực tế đã trả (0 = chưa nộp, = tổng bill = nộp đủ)
-export async function toggleSharePaid(roomId, periodId, memberId, isPaid, adminHash, paidAmount) {
-  const body = {
-    period_id: periodId,
-    member_id: memberId,
-    is_paid: isPaid,
-  };
-  if (paidAmount !== undefined && paidAmount !== null) {
-    body.paid_amount = Math.max(0, parseInt(paidAmount) || 0);
-  }
-  try {
-    const res = await fetch(`/api/admin/toggle-share-paid?${qs(roomId)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-hash': adminHash,
-      },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) return true;
-  } catch (e) {}
-
-  const current = getLocalData(roomId);
-  const share = current.member_shares.find(
-    (s) => s.period_id === periodId && s.member_id === memberId
-  );
-  if (share) {
-    share.is_paid = isPaid ? 1 : 0;
-    share.paid_at = isPaid ? new Date().toISOString() : null;
-    if (body.paid_amount !== undefined) share.paid_amount = body.paid_amount;
-  } else {
-    current.member_shares.push({
-      period_id: periodId,
-      member_id: memberId,
-      amount: 0,
-      is_paid: isPaid ? 1 : 0,
-      paid_at: isPaid ? new Date().toISOString() : null,
-      paid_amount: body.paid_amount !== undefined ? body.paid_amount : 0,
-      note: '',
-    });
-  }
-  saveLocalData(roomId, current);
-  return true;
 }
 
 // ---- Split config helpers (chia tiền chi tiết theo từng khoản) ----

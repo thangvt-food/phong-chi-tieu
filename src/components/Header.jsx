@@ -1,167 +1,226 @@
 import React, { useState } from 'react';
-import { Home, Settings, Plus, ChevronDown, DoorOpen } from 'lucide-react';
+import {
+  Home,
+  Settings,
+  Plus,
+  ChevronDown,
+  DoorOpen,
+  LogOut,
+  UserRound,
+  Link2,
+  KeyRound,
+} from 'lucide-react';
+import { ROLE_BADGE, ROLE_LABEL } from '../constants/roles';
 
 export default function Header({
   roomName,
   source,
+  me,
   rooms = [],
   currentRoomId,
-  memberName,
+  user,
+  canManage,
   onSwitchRoom,
-  onForgetRoom,
   onLeaveRoom,
-  onOpenCreateRoom,
+  onOpenAddRoom,
   onOpenAddExpense,
   onOpenSettings,
+  onOpenChangePassword,
+  onLogout,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const role = me?.role || null;
+
+  const close = () => setMenuOpen(false);
 
   return (
     <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200">
-      <div className="max-w-2xl mx-auto px-3 sm:px-4 py-2.5 flex items-center justify-between">
-        {/* Left: Room Badge + switcher */}
-        <div className="relative flex items-center gap-2">
+      <div className="max-w-2xl mx-auto px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2">
+        {/* Left: room + account menu */}
+        <div className="relative flex items-center gap-2 min-w-0">
           <button
             onClick={() => setMenuOpen((v) => !v)}
-            className="flex items-center gap-2 rounded-xl px-1 py-0.5 hover:bg-slate-100 transition-colors text-left"
-            title="Đổi phòng"
+            className="flex items-center gap-2 rounded-xl px-1 py-0.5 hover:bg-slate-100 transition-colors text-left min-w-0"
+            title="Tài khoản và các phòng"
           >
-            <div className="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-sm">
+            <div className="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-sm shrink-0">
               <Home className="w-4 h-4" />
             </div>
-            <div>
-              <div className="flex items-center gap-1.5">
-                <h1 className="font-bold text-base text-slate-900 leading-tight">
-                  {roomName || currentRoomId || 'Phòng chi tiêu'}
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <h1 className="font-bold text-base text-slate-900 leading-tight truncate">
+                  {roomName || 'Phòng chi tiêu'}
                 </h1>
-                {rooms.length > 1 && <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+                {role && (
+                  <span
+                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${ROLE_BADGE[role] || 'bg-slate-200 text-slate-700'}`}
+                  >
+                    {ROLE_LABEL[role] || role}
+                  </span>
+                )}
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                 <span
-                  className="w-2 h-2 rounded-full bg-emerald-500"
-                  title={
-                    source === 'd1'
-                      ? 'Cloudflare D1'
-                      : source === 'local'
-                        ? 'Lưu trên máy này (offline)'
-                        : source
-                  }
+                  className={`w-2 h-2 rounded-full shrink-0 ${source === 'offline' ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                  title={source === 'offline' ? 'Đang xem bản lưu offline — không ghi được' : 'Đã kết nối máy chủ'}
                 />
               </div>
-              {memberName && (
-                <p className="text-[10px] text-slate-500 leading-tight">Bạn là {memberName}</p>
+              {me?.name && (
+                <p className="text-[10px] text-slate-500 leading-tight truncate">
+                  Bạn là {me.nickname || me.name}
+                </p>
               )}
             </div>
           </button>
 
           {menuOpen && (
             <>
-              <div
-                className="fixed inset-0 z-40"
-                onClick={() => setMenuOpen(false)}
-                aria-hidden="true"
-              />
-              <div className="absolute left-0 top-full mt-1.5 z-50 w-60 bg-white rounded-2xl border border-slate-200 shadow-xl p-1.5">
-                <p className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+              <div className="fixed inset-0 z-40" onClick={close} aria-hidden="true" />
+              <div className="absolute left-0 top-full mt-1.5 z-50 w-72 bg-white rounded-2xl border border-slate-200 shadow-xl p-1.5">
+                <div className="flex items-center gap-2 px-2.5 py-2">
+                  <div className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs font-bold shrink-0">
+                    {(user?.display_name || user?.username || 'U').charAt(0).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-slate-900 truncate">
+                      {user?.display_name || user?.username}
+                    </p>
+                    <p className="text-[10px] text-slate-500 font-mono truncate">
+                      @{user?.username}
+                    </p>
+                  </div>
+                </div>
+
+                <p className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 uppercase tracking-wider border-t border-slate-100">
                   Phòng của bạn
                 </p>
-                {rooms.map((r) => {
-                  // listStoredRooms chỉ liệt kê phòng thiết bị này đã có dấu vết
-                  // (phiên hoặc hash PIN). Phòng hiện ra vì đang mở ở ?p= mà chưa có
-                  // dấu vết thì không có gì để gỡ/rời - ẩn hai dòng đó đi.
-                  const known = r.member_id != null || r.role != null;
-                  return (
-                    <div key={r.roomId} className="py-0.5">
-                      <button
-                        onClick={() => {
-                          setMenuOpen(false);
-                          if (r.roomId !== currentRoomId) onSwitchRoom(r.roomId);
-                        }}
-                        className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
-                          r.roomId === currentRoomId
-                            ? 'bg-indigo-50 text-indigo-700'
-                            : 'text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        {r.roomId}
-                        {r.member_name && (
-                          <span className="block text-[10px] font-normal text-slate-500">
-                            {r.member_name}
-                            {r.role ? ` · ${r.role}` : ''}
-                          </span>
-                        )}
-                      </button>
-                      {known && (
-                        <div className="flex items-center gap-2 px-2.5 pt-0.5">
-                          <button
-                            onClick={() => {
-                              setMenuOpen(false);
-                              onForgetRoom(r.roomId);
-                            }}
-                            className="text-[10px] text-slate-400 hover:text-slate-700 font-semibold"
-                            title="Xóa PIN, phiên và bản offline của phòng này trên máy đang dùng. Phòng vẫn còn trên server."
-                          >
-                            Gỡ khỏi máy này
-                          </button>
-                          {r.member_id != null ? (
-                            <button
-                              onClick={() => {
-                                setMenuOpen(false);
-                                onLeaveRoom(r.roomId);
-                              }}
-                              className="text-[10px] text-rose-400 hover:text-rose-600 font-semibold"
-                              title="Mất quyền vào phòng ở MỌI thiết bị. Tên vẫn còn trong sổ các kỳ cũ."
-                            >
-                              Rời phòng
-                            </button>
-                          ) : (
-                            // Chỉ có hash PIN mà không có phiên = máy này chưa từng bảo
-                            // server "tôi là thành viên nào". leave cần biết đúng người, nên
-                            // đừng hứa một nút mà server sẽ từ chối - đường của thiết bị này
-                            // là Cài đặt -> thành viên -> "Ngưng hoạt động" chính mình.
-                            <span
-                              className="text-[10px] text-slate-400"
-                              title="Máy này vào phòng bằng PIN chứ không bằng link mời nên không biết bạn là thành viên nào. Mở Cài đặt -> thành viên -> Ngưng hoạt động ở dòng tên của bạn."
-                            >
-                              Rời phòng trong Cài đặt
-                            </span>
-                          )}
-                        </div>
+                {rooms.length === 0 && (
+                  <p className="px-2.5 py-1.5 text-[11px] text-slate-400">
+                    Chưa tham gia phòng nào.
+                  </p>
+                )}
+                {rooms.map((r) => (
+                  <button
+                    key={r.room_id}
+                    onClick={() => {
+                      close();
+                      if (r.room_id !== currentRoomId) onSwitchRoom(r.room_id);
+                    }}
+                    className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-colors flex items-center justify-between gap-2 ${
+                      r.room_id === currentRoomId
+                        ? 'bg-indigo-50 text-indigo-700'
+                        : 'text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate">{r.room_name}</span>
+                      {r.member_name && (
+                        <span className="block text-[10px] font-normal text-slate-500 truncate">
+                          {r.member_name}
+                        </span>
                       )}
-                    </div>
-                  );
-                })}
-                <button
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onOpenCreateRoom();
-                  }}
-                  className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors border-t border-slate-100 mt-1"
-                >
-                  <DoorOpen className="w-3.5 h-3.5" />
-                  Tạo phòng / vào bằng link mời
-                </button>
+                    </span>
+                    <span
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${ROLE_BADGE[r.role] || 'bg-slate-200 text-slate-700'}`}
+                    >
+                      {ROLE_LABEL[r.role] || r.role}
+                    </span>
+                  </button>
+                ))}
+
+                <div className="border-t border-slate-100 mt-1 pt-1">
+                  <button
+                    onClick={() => {
+                      close();
+                      onOpenAddRoom('create');
+                    }}
+                    className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Tạo phòng mới
+                  </button>
+                  <button
+                    onClick={() => {
+                      close();
+                      onOpenAddRoom('join');
+                    }}
+                    className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    Nhận link mời
+                  </button>
+                  {currentRoomId && (
+                    <button
+                      onClick={() => {
+                        close();
+                        onLeaveRoom();
+                      }}
+                      className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 transition-colors"
+                      title={
+                        role === 'owner'
+                          ? 'Chủ phòng phải giao phòng trước khi rời'
+                          : 'Mất quyền vào phòng này; tên và phần tiền cũ vẫn nằm trong sổ'
+                      }
+                    >
+                      <DoorOpen className="w-3.5 h-3.5" />
+                      Rời phòng này
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      close();
+                      onOpenChangePassword();
+                    }}
+                    className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
+                  >
+                    <KeyRound className="w-3.5 h-3.5" />
+                    Đổi mật khẩu
+                  </button>
+                  <button
+                    onClick={() => {
+                      close();
+                      onLogout();
+                    }}
+                    className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 transition-colors"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Đăng xuất
+                  </button>
+                </div>
               </div>
             </>
           )}
         </div>
 
-        {/* Right: Quick Actions */}
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={onOpenAddExpense}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm transition-all active:scale-95"
-            title="Thêm chi tiêu mới"
-          >
-            <Plus className="w-4 h-4 stroke-[2.5]" />
-            <span className="hidden sm:inline">Chi tiêu</span>
-          </button>
+        {/* Right: quick actions */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {canManage && (
+            <button
+              onClick={onOpenAddExpense}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-sm transition-all active:scale-95"
+              title="Thêm khoản chi mới"
+            >
+              <Plus className="w-4 h-4 stroke-[2.5]" />
+              <span className="hidden sm:inline">Chi tiêu</span>
+            </button>
+          )}
 
-          <button
-            onClick={onOpenSettings}
-            className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
-            title="Cài đặt phòng"
-          >
-            <Settings className="w-4 h-4 stroke-[2]" />
-          </button>
+          {canManage ? (
+            <button
+              onClick={onOpenSettings}
+              className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+              title="Cài đặt phòng"
+            >
+              <Settings className="w-4 h-4 stroke-[2]" />
+            </button>
+          ) : (
+            <button
+              onClick={() => setMenuOpen(true)}
+              className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+              title="Tài khoản"
+            >
+              <UserRound className="w-4 h-4 stroke-[2]" />
+            </button>
+          )}
         </div>
       </div>
     </header>

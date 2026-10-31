@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Loader2, AlertCircle, Home, Plus, Link2, LogOut, WifiOff, DoorOpen } from 'lucide-react';
 import Header from './components/Header';
 import PeriodSelector from './components/PeriodSelector';
 import OverviewStats from './components/OverviewStats';
@@ -8,310 +9,377 @@ import ExpenseModal from './components/ExpenseModal';
 import PaymentModal from './components/PaymentModal';
 import MemberDetailModal from './components/MemberDetailModal';
 import VietQrModal from './components/VietQrModal';
-import AdminModal from './components/AdminModal';
 import AdminDashboard from './components/AdminDashboard';
-import RoomGate from './components/RoomGate';
+import AuthGate from './components/AuthGate';
+import AddRoomModal from './components/AddRoomModal';
+import ChangePasswordModal from './components/ChangePasswordModal';
 import {
   fetchRoomData,
   saveExpense,
   deleteExpense,
   toggleSharePaid,
   memberTogglePaid,
-  getStoredAdminHash,
-  setStoredAdminHash,
-  getStoredSession,
-  listStoredRooms,
-  roomIdFromUrl,
-  joinWithToken,
-  calculatePeriodDebts,
-  removeRoomFromDevice,
+  authMe,
+  authLogout,
+  previewInvite,
+  claimInvite,
   leaveRoom,
-  fetchMe,
-  getStoredMember,
-  normalizeRoom,
+  clearLegacyStorage,
+  getLastRoomId,
+  getStoredUser,
+  setLastRoomId,
+  calculatePeriodDebts,
 } from './services/api';
-import { Loader2 } from 'lucide-react';
+import { roleRank } from './constants/roles';
 
 export default function App() {
-  // ?p=quyết định phòng; thiếu ?p = phòng cũ nên URL cũ không hỏng.
-  const [roomId, setRoomId] = useState(() => roomIdFromUrl());
+  const booted = useRef(false);
+
+  const [auth, setAuth] = useState(() => getStoredUser());
+  const [authReady, setAuthReady] = useState(false);
+  const [myRooms, setMyRooms] = useState([]);
+  const [invite, setInvite] = useState(null);
+
+  const [roomId, setRoomId] = useState('');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState('');
 
-  const [adminHash, setAdminHash] = useState(() => getStoredAdminHash(roomId));
-  const [session, setSession] = useState(() => getStoredSession(roomId));
+  const [roomHint] = useState(() => {
+    const p = new URLSearchParams(window.location.search).get('p') || getLastRoomId();
+    return p ? { roomId: p } : null;
+  });
 
   // Modals
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState(null);
-
   const [isQrOpen, setIsQrOpen] = useState(false);
   const [selectedCalculation, setSelectedCalculation] = useState(null);
-
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [paymentCalculation, setPaymentCalculation] = useState(null);
-
   const [detailMemberId, setDetailMemberId] = useState(null);
-
-  const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState(false);
-  const [roomGateOpen, setRoomGateOpen] = useState(false);
-  // Danh sách phòng đọc từ localStorage, không phải state -> cần số này để đọc lại
-  // sau khi "gỡ khỏi máy này" một phòng KHÔNG phải phòng đang mở.
-  const [roomsTick, setRoomsTick] = useState(0);
-  // Lời dẫn trên RoomGate sau khi gỡ/rời phòng - để màn hình không nói dối.
-  const [gateNotice, setGateNotice] = useState('');
+  const [addRoomOpen, setAddRoomOpen] = useState(false);
+  const [addRoomTab, setAddRoomTab] = useState('create');
+  const [passwordOpen, setPasswordOpen] = useState(false);
 
-  // Link mời đến qua ?j=<token>: đổi lấy phiên rồi xóa token khỏi address bar
-  // và lịch sử, để không ai nhìn thấy lại nó.
-  const pendingInvite = useRef(new URLSearchParams(window.location.search).get('j'));
+  const loadRoom = async (target, { spinner = false } = {}) => {
+    if (!target) return null;
+    // Mọi thao tác ghi đều gửi roomId làm tham số ?p=. Sau khi claim link mời,
+    // loadRoom là nơi duy nhất biết phòng vừa mở, nên phải tự đồng bộ state.
+    setRoomId(target);
+    if (spinner) setLoading(true);
+    const res = await fetchRoomData(target);
+    setData(res);
+    if (res.source === 'need_auth') {
+      setAuth(null);
+      setMyRooms([]);
+    }
+    if (res.source === 'd1' || res.source === 'offline') {
+      setLastRoomId(target);
+      setSelectedPeriodId((prev) =>
+        (res.periods || []).some((p) => p.id === prev) ? prev : res.periods?.[0]?.id || ''
+      );
+    } else {
+      setSelectedPeriodId('');
+    }
+    if (spinner) setLoading(false);
+    return res;
+  };
 
+  const refreshMe = async () => {
+    const me = await authMe();
+    if (me.needsAuth) {
+      setAuth(null);
+      setMyRooms([]);
+      setData(null);
+      return null;
+    }
+    if (me.user) {
+      setAuth(me.user);
+      setMyRooms(me.rooms || []);
+    }
+    return me;
+  };
+
+  // Boot: dọn khóa PIN cũ -> ?j= -> tài khoản -> chọn phòng.
   useEffect(() => {
-    // Đang cầm link mời thì để effect join load - nó mới biết phòng nào.
-    if (pendingInvite.current) return;
-    loadData(roomId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId]);
-
-  useEffect(() => {
-    const token = pendingInvite.current;
-    if (!token) return;
-    pendingInvite.current = null;
+    if (booted.current) return;
+    booted.current = true;
     (async () => {
-      const result = await joinWithToken(token);
-      const clean = new URL(window.location.href);
-      clean.searchParams.delete('j');
-      if (result.success) clean.searchParams.set('p', result.room_id);
-      window.history.replaceState({}, '', clean.toString());
-      if (result.success) {
-        setSession(getStoredSession(result.room_id));
-        setAdminHash(getStoredAdminHash(result.room_id));
-        if (result.room_id === roomId) {
-          loadData(result.room_id);
-        } else {
-          // đổi roomId sẽ kích hoạt effect ở trên load phòng mới
-          setData(null);
-          setLoading(true);
-          setSelectedPeriodId('');
-          setRoomId(result.room_id);
-        }
-      } else {
-        setLoading(false);
-        alert(result.error || 'Link mời không còn hợp lệ.');
+      clearLegacyStorage();
+      const params = new URLSearchParams(window.location.search);
+      const inviteToken = params.get('j');
+      let pendingInvite = null;
+
+      if (inviteToken) {
+        const preview = await previewInvite(inviteToken);
+        if (preview.success) pendingInvite = { token: inviteToken, preview };
+        else alert(preview.error || 'Link mời không còn hiệu lực.');
+        const clean = new URL(window.location.href);
+        clean.searchParams.delete('j');
+        window.history.replaceState({}, '', clean.toString());
       }
+
+      const me = await authMe();
+      if (me.needsAuth || (!me.user && !me.offline)) {
+        setInvite(pendingInvite);
+        setAuth(null);
+        setLoading(false);
+        setAuthReady(true);
+        return;
+      }
+
+      if (!me.user) {
+        // Offline: dùng tài khoản đã lưu + cache đọc của phòng gần nhất.
+        setInvite(pendingInvite);
+        setAuth(getStoredUser());
+        const last = params.get('p') || getLastRoomId();
+        if (last) {
+          setRoomId(last);
+          await loadRoom(last);
+        }
+        setLoading(false);
+        setAuthReady(true);
+        return;
+      }
+
+      setAuth(me.user);
+      setMyRooms(me.rooms || []);
+      let rooms = me.rooms || [];
+      let target = '';
+
+      if (pendingInvite) {
+        const claim = await claimInvite(pendingInvite.token);
+        if (claim.success) {
+          const fresh = await authMe();
+          if (fresh.user) {
+            setAuth(fresh.user);
+            rooms = fresh.rooms || [];
+            setMyRooms(rooms);
+          }
+          target = claim.room_id;
+        } else {
+          alert(claim.error || 'Không nhận được link mời.');
+        }
+      }
+
+      if (!target) {
+        const urlRoom = params.get('p') || '';
+        const last = getLastRoomId();
+        if (urlRoom && rooms.some((r) => r.room_id === urlRoom)) target = urlRoom;
+        else if (last && rooms.some((r) => r.room_id === last)) target = last;
+        else if (rooms.length) target = rooms[0].room_id;
+        else if (urlRoom) target = urlRoom;
+      }
+
+      if (target) {
+        setRoomId(target);
+        await loadRoom(target);
+      }
+      setLoading(false);
+      setAuthReady(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load room data
-  const loadData = async (targetRoom = roomId) => {
-    try {
-      const res = await fetchRoomData(targetRoom);
-      setData(res);
-      if (res.periods && res.periods.length > 0 && !selectedPeriodId) {
-        setSelectedPeriodId(res.periods[0].id);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const switchRoom = (nextRoom) => {
-    if (!nextRoom || nextRoom === roomId) return;
-    setGateNotice('');
-    const url = new URL(window.location.href);
-    url.searchParams.set('p', nextRoom);
-    window.history.pushState({}, '', url.toString());
-    setRoomId(nextRoom);
-    setData(null);
-    setLoading(true);
-    setSelectedPeriodId('');
-    setAdminHash(getStoredAdminHash(nextRoom));
-    setSession(getStoredSession(nextRoom));
-  };
-
-  // Ensure selected period is valid
+  // Kỳ đang chọn phải tồn tại trong danh sách kỳ của phòng.
   useEffect(() => {
     if (data?.periods && data.periods.length > 0) {
       const exists = data.periods.some((p) => p.id === selectedPeriodId);
-      if (!exists) {
-        setSelectedPeriodId(data.periods[0].id);
-      }
+      if (!exists) setSelectedPeriodId(data.periods[0].id);
     }
   }, [data?.periods, selectedPeriodId]);
 
-  const activePeriod = data?.periods?.find((p) => p.id === selectedPeriodId) || data?.periods?.[0];
+  const activePeriod =
+    data?.periods?.find((p) => p.id === selectedPeriodId) || data?.periods?.[0];
 
-  const currentPeriodExpenses = useMemo(() => {
-    return (data?.expenses || []).filter((e) => e.period_id === activePeriod?.id);
-  }, [data?.expenses, activePeriod]);
+  const currentPeriodExpenses = useMemo(
+    () => (data?.expenses || []).filter((e) => e.period_id === activePeriod?.id),
+    [data?.expenses, activePeriod]
+  );
 
-  const activeMembers = useMemo(() => {
-    return (data?.members || []).filter((m) => m.is_active !== 0);
-  }, [data?.members]);
+  const activeMembers = useMemo(
+    () => (data?.members || []).filter((m) => m.is_active !== 0),
+    [data?.members]
+  );
 
-  // Danh sách phòng thiết bị này từng vào (localStorage, không gọi server).
-  const rooms = useMemo(() => {
-    const known = listStoredRooms();
-    if (!known.some((r) => r.roomId === roomId)) known.unshift({ roomId, member_id: null, role: null });
-    return known;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, data?.room_id, roomsTick]);
+  const debts = useMemo(
+    () =>
+      calculatePeriodDebts(
+        currentPeriodExpenses,
+        activeMembers,
+        data?.member_shares || [],
+        activePeriod?.id || '',
+        // Danh sách CẢ người đã rời: giữ đúng split_config của hóa đơn cũ.
+        data?.members || []
+      ),
+    [currentPeriodExpenses, activeMembers, data?.member_shares, data?.members, activePeriod]
+  );
 
-  // Hai hành động tách rời theo đúng hai câu hỏi khác nhau:
-  //   "Gỡ khỏi máy này" = quên thiết bị, phòng vẫn còn và vẫn vào lại được bằng PIN/link.
-  //   "Rời phòng"        = nói server thu mọi phiên -> mất quyền ở mọi thiết bị.
-  const afterRoomRemoved = (target, reason) => {
-    if (target !== roomId) {
-      setRoomsTick((n) => n + 1);
-      return;
-    }
-    const rest = listStoredRooms().filter((r) => r.roomId !== target);
-    setSession(null);
-    setAdminHash('');
-    if (rest.length) {
-      switchRoom(rest[0].roomId);
-      return;
-    }
-    // Nói đúng lý do, đừng báo "phòng không tồn tại" với người vừa tự xóa phòng
-    // khỏi máy của mình - phòng vẫn còn nguyên trên máy chủ.
-    setGateNotice(reason || '');
-    setData({ ...normalizeRoom(null, target), source: 'need_room' });
+  const me = data?.me || null;
+  const myRank = roleRank(me?.role);
+  const canManage = myRank >= 3;
+  const canTickSelf = myRank >= 2;
+  const isOffline = data?.source === 'offline';
+
+  // ---- Điều hướng phòng ----
+
+  const switchRoom = async (next) => {
+    if (!next) return;
+    if (next === roomId && data && data.source !== 'need_room' && data.source !== 'forbidden') return;
+    setIsAdminDashboardOpen(false);
+    setRoomId(next);
+    const url = new URL(window.location.href);
+    url.searchParams.set('p', next);
+    window.history.pushState({}, '', url.toString());
+    setData(null);
+    setSelectedPeriodId('');
+    await loadRoom(next, { spinner: true });
   };
 
-  const handleForgetRoom = (target) => {
-    const ok = confirm(
-      `Gỡ "${target}" khỏi máy này?\n\n` +
-        'Xóa PIN đã nhớ, phiên và bản lưu offline của phòng trên trình duyệt đang dùng. ' +
-        'Phòng VẪN CÒN trên máy chủ và ở các thiết bị khác; muốn vào lại thì cần PIN hoặc link mời.'
-    );
-    if (!ok) return;
-    removeRoomFromDevice(target);
-    afterRoomRemoved(
-      target,
-      `Bạn vừa gỡ "${target}" khỏi máy này. Phòng vẫn còn trên máy chủ - dán lại link mời hoặc nhập PIN để vào.`
-    );
+  const handleAuthed = async ({ claimedRoomId } = {}) => {
+    setInvite(null);
+    const fresh = await authMe();
+    if (!fresh.user) {
+      setAuth(null);
+      return;
+    }
+    setAuth(fresh.user);
+    setMyRooms(fresh.rooms || []);
+    const rooms = fresh.rooms || [];
+    let target = claimedRoomId;
+    if (!target || !rooms.some((r) => r.room_id === target)) target = rooms[0]?.room_id || '';
+    if (target) {
+      const url = new URL(window.location.href);
+      url.searchParams.set('p', target);
+      window.history.replaceState({}, '', url.toString());
+      setData(null);
+      setSelectedPeriodId('');
+      await loadRoom(target, { spinner: true });
+    }
   };
 
-  const handleLeaveRoom = async (target) => {
-    const stored = getStoredSession(target);
-    const ok = confirm(
-      `Rời "${target}"?\n\n` +
-        'Mất quyền vào phòng ở MỌI thiết bị và không tự quay lại được - cần chủ phòng gửi link mời mới. ' +
-        'Tên và phần tiền của bạn trong các kỳ cũ vẫn nằm trong sổ.'
-    );
-    if (!ok) return;
-    const result = await leaveRoom(target, {
-      adminHash: getStoredAdminHash(target),
-      member_id: stored?.member_id || getStoredMember(target),
-    });
+  const handleEnterRoom = async (next) => {
+    setAddRoomOpen(false);
+    const fresh = await authMe();
+    if (fresh.user) {
+      setAuth(fresh.user);
+      setMyRooms(fresh.rooms || []);
+    }
+    await switchRoom(next);
+  };
+
+  const clearRoomFromUrl = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('p');
+    window.history.replaceState({}, '', url.toString());
+  };
+
+  const handleLogout = async () => {
+    await authLogout();
+    setAuth(null);
+    setMyRooms([]);
+    setData(null);
+    setSelectedPeriodId('');
+    setRoomId('');
+    setIsAdminDashboardOpen(false);
+  };
+
+  const handleLeaveRoom = async () => {
+    if (!me) return;
+    if (me.is_owner) {
+      alert(
+        'Bạn là chủ phòng. Hãy giao phòng cho người khác trong Cài đặt → Thành viên trước khi rời.'
+      );
+      return;
+    }
+    if (!confirm(
+      `Rời "${data?.room_name || roomId}"?\n\n` +
+        'Bạn mất quyền vào phòng này; tên và phần tiền của bạn trong các kỳ cũ vẫn nằm trong sổ. ' +
+        'Muốn vào lại thì cần chủ phòng gửi link mời mới.'
+    )) return;
+
+    const result = await leaveRoom(roomId);
     if (!result.success) {
       alert(result.error || 'Không rời phòng được.');
       return;
     }
-    afterRoomRemoved(
-      target,
-      `Bạn đã rời "${target}". Tên và phần tiền của bạn vẫn nằm trong sổ các kỳ cũ; muốn vào lại thì cần chủ phòng gửi link mời mới.`
-    );
-  };
-
-  // Phiên có thể đã bị thu hồi từ lần mở trước (chủ phòng đá, hoặc tự rời ở máy khác).
-  // /api/me là chỗ duy nhất biết được, nên hỏi một lần mỗi khi đổi phòng.
-  useEffect(() => {
-    if (!session?.token) return undefined;
-    let cancelled = false;
-    fetchMe(roomId).then((me) => {
-      if (cancelled) return;
-      if (me.needInvite) {
-        setSession(null);
-        alert(me.error || 'Phiên ở phòng này không còn hiệu lực, cần link mời mới.');
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomId, session?.token]);
-
-  // Auto-calculated debts and shares
-  const debts = useMemo(() => {
-    return calculatePeriodDebts(
-      currentPeriodExpenses,
-      activeMembers,
-      data?.member_shares || [],
-      activePeriod?.id || '',
-      // danh sách CẢ người đã rời: giữ đúng split_config của hóa đơn cũ
-      data?.members || []
-    );
-  }, [currentPeriodExpenses, activeMembers, data?.member_shares, data?.members, activePeriod]);
-
-  // Handlers
-  // `then` = việc cần làm tiếp sau khi nhập PIN xong, để không bắt người dùng bấm lại từ đầu.
-  const [afterAdmin, setAfterAdmin] = useState(null);
-
-  const requireAdminHash = (then) => {
-    const hash = adminHash || getStoredAdminHash(roomId);
-    if (!hash) {
-      setAfterAdmin(then || null);
-      setIsAdminModalOpen(true);
-      return null;
+    const fresh = await authMe();
+    const rooms = fresh.rooms || [];
+    setMyRooms(rooms);
+    if (fresh.user) setAuth(fresh.user);
+    const next = rooms[0]?.room_id || '';
+    if (next) {
+      await switchRoom(next);
+    } else {
+      setRoomId('');
+      setData(null);
+      setSelectedPeriodId('');
+      clearRoomFromUrl();
     }
-    return hash;
   };
+
+  // ---- Ghi sổ ----
 
   const handleSaveExpense = async (expense) => {
-    const hash = requireAdminHash();
-    if (!hash) return;
-    const result = await saveExpense(roomId, expense, hash);
-    if (!result?.success) {
-      if (result?.unauthorized) {
-        setIsAdminModalOpen(true);
-      } else {
-        alert(result?.error || 'Không thể lưu khoản chi!');
+    const result = await saveExpense(roomId, expense);
+    if (!result.success) {
+      if (result.unauthorized) {
+        alert('Phiên đã hết hạn, đăng nhập lại.');
+        await refreshMe();
+        return;
       }
+      alert(result.error || 'Không thể lưu khoản chi!');
       return;
     }
-    if (result.period_id) {
-      setSelectedPeriodId(result.period_id);
-    }
-    await loadData();
+    if (result.period_id) setSelectedPeriodId(result.period_id);
+    await loadRoom(roomId);
   };
 
   const handleDeleteExpense = async (id) => {
-    if (confirm('Xóa khoản chi này?')) {
-      const hash = requireAdminHash();
-      if (!hash) return;
-      await deleteExpense(roomId, id, hash);
-      await loadData();
-    }
-  };
-
-  // Member tự tick phần của mình bằng phiên (không cần PIN). Muốn tick hộ người
-  // khác hoặc sửa số liệu thì phải là admin.
-  const handleTogglePaid = async (periodId, memberId, nextPaid, paidAmount) => {
-    const targetPeriod = periodId || activePeriod?.id;
-    if (session && session.member_id === memberId) {
-      const result = await memberTogglePaid(roomId, {
-        period_id: targetPeriod,
-        is_paid: nextPaid,
-        paid_amount: paidAmount,
-      });
-      if (result.needInvite) {
-        setSession(null);
-        alert('Phiên của bạn đã hết hạn, cần link mời mới.');
-      } else if (!result.success) {
-        alert(result.error || 'Không lưu được!');
+    if (!confirm('Xóa khoản chi này?')) return;
+    const result = await deleteExpense(roomId, id);
+    if (!result.success) {
+      if (result.unauthorized) {
+        alert('Phiên đã hết hạn, đăng nhập lại.');
+        await refreshMe();
+        return;
       }
-      await loadData();
+      alert(result.error || 'Không xóa được khoản chi.');
       return;
     }
-    const hash = requireAdminHash();
-    if (!hash) return;
-    await toggleSharePaid(roomId, targetPeriod, memberId, nextPaid, hash, paidAmount);
-    await loadData();
+    await loadRoom(roomId);
+  };
+
+  const handleTogglePaid = async (periodId, memberId, nextPaid, paidAmount) => {
+    if (!me || isOffline) return;
+    const targetPeriod = periodId || activePeriod?.id;
+    if (!targetPeriod) {
+      alert('Phòng chưa có kỳ nào. Hãy tạo kỳ hoặc thêm khoản chi trước.');
+      return;
+    }
+    const isSelf = me.member_id === memberId;
+    if (isSelf ? !canTickSelf : !canManage) return;
+
+    const result = isSelf
+      ? await memberTogglePaid(roomId, {
+          period_id: targetPeriod,
+          is_paid: nextPaid,
+          paid_amount: paidAmount,
+        })
+      : await toggleSharePaid(roomId, targetPeriod, memberId, nextPaid, paidAmount);
+
+    if (!result.success) {
+      if (result.unauthorized) {
+        alert('Phiên đã hết hạn, đăng nhập lại.');
+        await refreshMe();
+        return;
+      }
+      alert(result.error || 'Không lưu được!');
+      return;
+    }
+    await loadRoom(roomId);
   };
 
   const handleRecordPayment = (calc) => {
@@ -326,7 +394,6 @@ export default function App() {
     await handleTogglePaid(activePeriod?.id, member.id, isFull, newPaidTotal);
   };
 
-  // Toggle nhanh trong modal chi tiết: đủ <-> về 0, dở -> thu nốt
   const handleDetailToggle = async (calc) => {
     if (!calc) return;
     const nextPaid = !calc.isPaid;
@@ -338,39 +405,20 @@ export default function App() {
     );
   };
 
-  const detailCalc = (debts.memberCalculations || []).find(
-    (c) => c.member.id === detailMemberId
-  );
+  const detailCalc = (debts.memberCalculations || []).find((c) => c.member.id === detailMemberId);
 
   const handleOpenQr = (calc) => {
     setSelectedCalculation(calc);
     setIsQrOpen(true);
   };
 
-  const handleAdminSuccess = (hash) => {
-    setAdminHash(hash);
-    setStoredAdminHash(roomId, hash);
-    setIsAdminModalOpen(false);
-    if (afterAdmin === 'settings') setIsAdminDashboardOpen(true);
-    setAfterAdmin(null);
+  const refreshAll = async () => {
+    await Promise.all([loadRoom(roomId), refreshMe()]);
   };
 
-  // Cài đặt là của admin: chưa có hash của ĐÚNG phòng thì hỏi PIN đã.
-  const handleOpenSettings = () => {
-    // Link "Quản lý mời" không có PIN nhưng server cho nó tạo/thu hồi link. Dashboard
-    // sẽ tự thu lại còn đúng tab thành viên khi biết người mở là manager (managerOnly).
-    if (adminHash || session?.role !== 'manager') {
-      if (!requireAdminHash('settings')) return;
-    }
-    setIsAdminDashboardOpen(true);
-  };
+  // ---- Màn hình ----
 
-  const enterRoom = (nextRoom) => {
-    setRoomGateOpen(false);
-    switchRoom(nextRoom);
-  };
-
-  if (loading) {
+  if (!authReady || loading) {
     return (
       <div className="min-h-screen bg-slate-100 flex flex-col items-center justify-center p-4">
         <Loader2 className="w-8 h-8 text-indigo-600 animate-spin mb-2" />
@@ -379,42 +427,185 @@ export default function App() {
     );
   }
 
-  // Phòng ở ?p= không tồn tại trên server: dừng lại ở màn tạo / vào phòng,
-  // không vẽ một sổ trống toorg rồi để người dùng tưởng mất dữ liệu.
-  if (data?.source === 'need_room') {
-    return <RoomGate missingRoomId={roomId} notice={gateNotice} onEnter={enterRoom} />;
+  if (!auth) {
+    return (
+      <AuthGate
+        invite={invite}
+        roomHint={roomHint}
+        onAuthed={handleAuthed}
+      />
+    );
   }
+
+  if (!myRooms.length) {
+    return (
+      <>
+        <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-md p-6 shadow-xl border border-slate-100 space-y-4 text-center">
+            <div className="w-12 h-12 mx-auto rounded-2xl bg-indigo-100 text-indigo-700 flex items-center justify-center">
+              <Home className="w-6 h-6" />
+            </div>
+            <div>
+              <h2 className="font-bold text-base text-slate-900">Chưa có phòng nào</h2>
+              <p className="text-xs text-slate-500 mt-1">
+                Tạo phòng mới, hoặc nhận link mời từ chủ phòng để bắt đầu.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={() => {
+                  setAddRoomTab('create');
+                  setAddRoomOpen(true);
+                }}
+                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" /> Tạo phòng mới
+              </button>
+              <button
+                onClick={() => {
+                  setAddRoomTab('join');
+                  setAddRoomOpen(true);
+                }}
+                className="w-full py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-1.5"
+              >
+                <Link2 className="w-4 h-4" /> Nhận link mời
+              </button>
+              <button
+                onClick={handleLogout}
+                className="text-[11px] font-semibold text-slate-400 hover:text-slate-600 pt-1"
+              >
+                Đăng xuất
+              </button>
+            </div>
+          </div>
+        </div>
+        <AddRoomModal
+          isOpen={addRoomOpen}
+          initialTab={addRoomTab}
+          onClose={() => setAddRoomOpen(false)}
+          onEnter={handleEnterRoom}
+        />
+      </>
+    );
+  }
+
+  if (data?.source === 'need_room' || data?.source === 'forbidden') {
+    const missing = data.source === 'need_room';
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl w-full max-w-md p-6 shadow-xl border border-slate-100 space-y-4 text-center">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <div>
+            <h2 className="font-bold text-base text-slate-900">
+              {missing ? 'Phòng không tồn tại' : 'Bạn không có quyền vào phòng này'}
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              {missing
+                ? 'Link phòng này không còn hoặc đã bị xóa. Mã phòng chỉ là liên kết kỹ thuật — hãy mở phòng từ danh sách của bạn.'
+                : 'Tài khoản của bạn không phải thành viên phòng này, hoặc đã bị ngưng hoạt động. Chủ phòng cần gửi link mời mới.'}
+            </p>
+          </div>
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={() => switchRoom(myRooms[0].room_id)}
+              className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-1.5"
+            >
+              <Home className="w-4 h-4" /> Về phòng của tôi
+            </button>
+            <button
+              onClick={() => {
+                setAddRoomTab('join');
+                setAddRoomOpen(true);
+              }}
+              className="w-full py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-1.5"
+            >
+              <Link2 className="w-4 h-4" /> Nhận link mời
+            </button>
+          </div>
+        </div>
+        <AddRoomModal
+          isOpen={addRoomOpen}
+          initialTab={addRoomTab}
+          onClose={() => setAddRoomOpen(false)}
+          onEnter={handleEnterRoom}
+        />
+      </div>
+    );
+  }
+
+  if (data?.source === 'offline_empty' || data?.source === 'error') {
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl w-full max-w-md p-6 shadow-xl border border-slate-100 space-y-4 text-center">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-slate-100 text-slate-600 flex items-center justify-center">
+            <WifiOff className="w-6 h-6" />
+          </div>
+          <div>
+            <h2 className="font-bold text-base text-slate-900">
+              {data.source === 'offline_empty' ? 'Không có kết nối' : 'Máy chủ đang lỗi'}
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">
+              {data.error || 'Chưa tải được sổ của phòng này trên thiết bị. Kiểm tra mạng rồi thử lại.'}
+            </p>
+          </div>
+          <button
+            onClick={() => loadRoom(roomId, { spinner: true })}
+            className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold"
+          >
+            Thử lại
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const detailCanAct = detailCalc
+    ? detailCalc.member.id === me?.member_id
+      ? canTickSelf && !isOffline
+      : canManage && !isOffline
+    : false;
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col">
-      {/* Header */}
       <Header
-        roomName={data.room_name || data.settings?.room_name}
-        source={data.source}
-        rooms={rooms}
+        roomName={data?.room_name}
+        source={data?.source}
+        me={me}
+        rooms={myRooms}
         currentRoomId={roomId}
-        memberName={session?.member_name}
+        user={auth}
+        canManage={canManage && !isOffline}
         onSwitchRoom={switchRoom}
-        onForgetRoom={handleForgetRoom}
         onLeaveRoom={handleLeaveRoom}
-        onOpenCreateRoom={() => setRoomGateOpen(true)}
+        onOpenAddRoom={(tab) => {
+          setAddRoomTab(tab);
+          setAddRoomOpen(true);
+        }}
         onOpenAddExpense={() => {
           setEditingExpense(null);
           setIsExpenseModalOpen(true);
         }}
-        onOpenSettings={handleOpenSettings}
+        onOpenSettings={() => setIsAdminDashboardOpen(true)}
+        onOpenChangePassword={() => setPasswordOpen(true)}
+        onLogout={handleLogout}
       />
 
-      {/* Main compact layout */}
       <main className="max-w-xl w-full mx-auto px-3 sm:px-4 py-3 space-y-3 flex-1">
-        {/* Month Selector */}
+        {isOffline && (
+          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-semibold flex items-center gap-2">
+            <WifiOff className="w-3.5 h-3.5 shrink-0" />
+            Đang xem bản lưu offline. Ghi sổ và tick đã nộp tạm khóa đến khi có mạng.
+          </div>
+        )}
+
         <PeriodSelector
           periods={data.periods || []}
           selectedPeriodId={selectedPeriodId}
           onSelectPeriod={(id) => setSelectedPeriodId(id)}
         />
 
-        {/* Overview Stats */}
         <OverviewStats
           totalAllExpenses={debts.totalAllExpenses}
           sharedPerMember={debts.sharedPerMember}
@@ -425,20 +616,22 @@ export default function App() {
           remaining={debts.remaining}
         />
 
-        {/* Member Cards & VietQR */}
         <MemberCardList
           memberCalculations={debts.memberCalculations}
           periodId={activePeriod?.id || ''}
+          myMemberId={me?.member_id || ''}
+          canTickSelf={canTickSelf && !isOffline}
+          canManageAll={canManage && !isOffline}
           onOpenQr={handleOpenQr}
           onTogglePaid={handleTogglePaid}
           onRecordPayment={handleRecordPayment}
           onSelectMember={(calc) => setDetailMemberId(calc.member.id)}
         />
 
-        {/* Expenses List */}
         <ExpenseList
           expenses={currentPeriodExpenses}
           members={data.members || []}
+          canManage={canManage && !isOffline}
           onAddExpense={() => {
             setEditingExpense(null);
             setIsExpenseModalOpen(true);
@@ -451,7 +644,6 @@ export default function App() {
         />
       </main>
 
-      {/* Expense Modal */}
       <ExpenseModal
         isOpen={isExpenseModalOpen}
         onClose={() => {
@@ -463,17 +655,15 @@ export default function App() {
         editingExpense={editingExpense}
       />
 
-      {/* VietQR Modal */}
       <VietQrModal
         isOpen={isQrOpen}
         onClose={() => setIsQrOpen(false)}
         calculation={selectedCalculation}
-        settings={data.settings}
+        settings={data?.settings}
         periodTitle={activePeriod?.title || ''}
         roomId={roomId}
       />
 
-      {/* Partial Payment Modal */}
       <PaymentModal
         isOpen={isPaymentOpen}
         onClose={() => {
@@ -484,43 +674,37 @@ export default function App() {
         onConfirm={handleConfirmPayment}
       />
 
-      {/* Member Detail Modal */}
       <MemberDetailModal
         isOpen={!!detailMemberId}
         onClose={() => setDetailMemberId(null)}
         calc={detailCalc}
-        members={data.members || []}
+        members={data?.members || []}
         sharedExpenses={debts.sharedExpenses || []}
+        canAct={detailCanAct}
         onOpenQr={handleOpenQr}
         onTogglePaid={handleDetailToggle}
         onRecordPayment={handleRecordPayment}
       />
 
-      {/* Admin PIN & Hash Modal */}
-      <AdminModal
-        isOpen={isAdminModalOpen}
-        roomId={roomId}
-        roomName={data.room_name}
-        onClose={() => setIsAdminModalOpen(false)}
-        onSuccess={handleAdminSuccess}
-      />
-
-      {/* Admin Settings Dashboard */}
       <AdminDashboard
         isOpen={isAdminDashboardOpen}
         roomId={roomId}
         onClose={() => setIsAdminDashboardOpen(false)}
         data={data}
-        adminHash={adminHash}
-        session={session}
-        onDataRefresh={loadData}
+        me={me}
+        onDataRefresh={refreshAll}
       />
 
-      {/* Tạo phòng / vào phòng bằng link mời */}
-      <RoomGate
-        isOpen={roomGateOpen}
-        onClose={() => setRoomGateOpen(false)}
-        onEnter={enterRoom}
+      <AddRoomModal
+        isOpen={addRoomOpen}
+        initialTab={addRoomTab}
+        onClose={() => setAddRoomOpen(false)}
+        onEnter={handleEnterRoom}
+      />
+
+      <ChangePasswordModal
+        isOpen={passwordOpen}
+        onClose={() => setPasswordOpen(false)}
       />
     </div>
   );

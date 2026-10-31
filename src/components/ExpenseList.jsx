@@ -27,6 +27,7 @@ const ICON_MAP = {
 export default function ExpenseList({
   expenses = [],
   members = [],
+  canManage = false,
   onAddExpense,
   onEditExpense,
   onDeleteExpense,
@@ -39,13 +40,15 @@ export default function ExpenseList({
           <Receipt className="w-4 h-4 text-indigo-600 stroke-[2.5]" />
           <span>Khoản chi ({expenses.length})</span>
         </div>
-        <button
-          onClick={onAddExpense}
-          className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all active:scale-95"
-        >
-          <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-          <span>Thêm</span>
-        </button>
+        {canManage && (
+          <button
+            onClick={onAddExpense}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all active:scale-95"
+          >
+            <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+            <span>Thêm</span>
+          </button>
+        )}
       </div>
 
       {/* Expenses Rows */}
@@ -119,14 +122,14 @@ export default function ExpenseList({
 
                   <button
                     onClick={() => onEditExpense(exp)}
-                    className="p-1 text-slate-400 hover:text-indigo-600 transition-colors"
+                    className={`p-1 text-slate-400 hover:text-indigo-600 transition-colors ${canManage ? '' : 'hidden'}`}
                     title="Sửa"
                   >
                     <Edit2 className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => onDeleteExpense(exp.id)}
-                    className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
+                    className={`p-1 text-slate-400 hover:text-rose-600 transition-colors ${canManage ? '' : 'hidden'}`}
                     title="Xóa"
                   >
                     <Trash2 className="w-3.5 h-3.5" />

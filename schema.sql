@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS invites (
   uses_left  INTEGER NOT NULL DEFAULT 1
 );
 
+-- Phiên theo phòng của PR7: code từ 004 không còn đọc/ghi bảng này. Để nguyên cho đường
+-- rollback; một lần dọn sau khi tài khoản đã chạy ổn định.
 CREATE TABLE IF NOT EXISTS sessions (
   token_hash   TEXT PRIMARY KEY,
   room_id      TEXT NOT NULL,
@@ -95,7 +97,43 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen_at DATETIME
 );
 
+-- Version 4: tài khoản và liên kết tài khoản ↔ thành viên. Phải khớp migrations/004_accounts.sql.
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT PRIMARY KEY,
+  username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  display_name  TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_sessions (
+  token_hash   TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL,
+  created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at   DATETIME NOT NULL,
+  revoked_at   DATETIME,
+  last_seen_at DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS memberships (
+  room_id    TEXT NOT NULL,
+  member_id  TEXT NOT NULL,
+  user_id    TEXT NOT NULL,
+  role       TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('viewer','member','manager')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (room_id, member_id)
+);
+
+CREATE TABLE IF NOT EXISTS auth_throttle (
+  key          TEXT PRIMARY KEY,
+  failures     INTEGER NOT NULL DEFAULT 0,
+  locked_until DATETIME
+);
+
 CREATE INDEX IF NOT EXISTS ix_invites_room_member ON invites(room_id, member_id);
+CREATE INDEX IF NOT EXISTS ix_usession_user       ON user_sessions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_membership_room_user ON memberships(room_id, user_id);
+CREATE INDEX IF NOT EXISTS ix_membership_user     ON memberships(user_id);
 CREATE INDEX IF NOT EXISTS ix_sessions_room       ON sessions(room_id, member_id);
 CREATE INDEX IF NOT EXISTS ix_exp_room_period     ON expenses(room_id, period_id);
 CREATE INDEX IF NOT EXISTS ix_exp_room_date       ON expenses(room_id, expense_date);
@@ -105,10 +143,11 @@ CREATE TABLE IF NOT EXISTS schema_meta (
   version    INTEGER PRIMARY KEY,
   applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
--- DB dựng mới đã có sẵn hình dạng của version 3, stamp cả hai để MAX(version) khớp
--- prod đi đường migration (002 -> 003).
+-- DB dựng mới đã có sẵn hình dạng của version 4, stamp cả ba để MAX(version) khớp
+-- prod đi đường migration (002 -> 003 -> 004).
 INSERT OR IGNORE INTO schema_meta (version) VALUES (2);
 INSERT OR IGNORE INTO schema_meta (version) VALUES (3);
+INSERT OR IGNORE INTO schema_meta (version) VALUES (4);
 
 -- Seed phòng mặc định cho DB mới tinh.
 INSERT OR IGNORE INTO rooms (room_id, name) VALUES ('phong-2a', 'Phòng Trọ 2A');
@@ -121,7 +160,7 @@ INSERT OR IGNORE INTO settings (room_id, key, value) VALUES
   ('phong-2a', 'transfer_prefix',  'TIEN PHONG'),
   ('phong-2a', 'transfer_code',    'P2A');
 
--- Hash của "123456". CHỈ cho D1 local: DB production phải đổi PIN ngay khi migrate
--- (Cài đặt > PIN & Mời người), nếu không ai biết URL là ghi được vào sổ.
+-- Hash của "123456". CHỈ cho D1 local: DB production phải đổi mã khôi phục ngay sau
+-- deploy (Khôi phục chủ phòng bằng PIN -> đặt PIN mới), nếu không ai biết PIN là chiếm được phòng.
 INSERT OR IGNORE INTO settings (room_id, key, value) VALUES
   ('phong-2a', 'admin_pin_hash',   '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92');

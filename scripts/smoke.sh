@@ -1,34 +1,56 @@
 #!/usr/bin/env bash
-# Smoke test đa phòng, chạy trên D1 LOCAL (không đụng production).
-#   1) npm run build
-#   2) npm run dev:server
-#   3) bash scripts/smoke.sh
+# Smoke test tài khoản + phân quyền, chạy trên D1 LOCAL (không đụng production).
+#   1) npm run db:schema:local     (dựng DB sạch, schema version 4)
+#   2) npm run build
+#   3) npm run dev:server
+#   4) bash scripts/smoke.sh
 #
-# Script tự tạo BA phòng scratch qua API với PIN của chính nó, mọi assertion đi qua HTTP,
-# và dọn sạch bằng SQL ở cuối (kể cả khi fail).
-#   A, B - đa phòng: slug, PIN riêng, kỳ không đè nhau, link mời một lượt, ba mức quyền.
-#   C    - không có chủ phòng, để đo riêng guard "phòng còn lại một người".
+# Mọi assertion đi qua HTTP. Script tự dọn phòng/user scratch ở đầu và cuối.
 
 set -uo pipefail
 API="${API:-http://127.0.0.1:8788}"
 NS=$(date +%s)
-RA="phong-smoke-a-$NS"
-RB="phong-smoke-b-$NS"
-# Phòng C dựng ở mục 17: KHONG có owner (POST /api/rooms cho phép bỏ owner_name) để đo
-# riêng guard "phòng phải còn ít nhất một người active", không lẫn với guard chủ phòng.
-RC="phong-smoke-c-$NS"
 DB_NAME="${DB_NAME:-phong_chi_tieu_db}"
+RA="smoke-a-$NS"
+RB="smoke-b-$NS"
 PASS=0; FAIL=0
 
-sha256() { python3 -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$1"; }
-HASH_A="$(sha256 'pin-phong-a')"
-HASH_B="$(sha256 'pin-phong-b')"
-HASH_C="$(sha256 'pin-phong-c')"
+U_A="smoke-alice-$NS"
+U_B="smoke-bob-$NS"
+U_C="smoke-carol-$NS"
+U_D="smoke-dave-$NS"
+U_F="smoke-frank-$NS"
+U_R="smoke-rec-$NS"
+U_T="smoke-throttle-$NS"
+PW_A='pass-alice-123'
+PW_B='pass-bob-123'
+PW_C='pass-carol-123'
+PW_D='pass-dave-123'
+PW_F='pass-frank-123'
+PW_R='pass-rec-123'
+PW_T='pass-throttle-123'
 
-api() { # api METHOD PATH [json] [admin-hash] [bearer]
-  local m=$1 p=$2 j=${3:-} h=${4:-} b=${5:-}
-  local args=(-s --max-time 20 -X "$m" -w '\n%{http_code}' "$API$p" -H 'Content-Type: application/json')
-  [ -n "$h" ] && args+=(-H "x-admin-hash: $h")
+purge() {
+  npx wrangler d1 execute "$DB_NAME" --local --command="
+    DELETE FROM member_shares WHERE room_id LIKE 'smoke-%';
+    DELETE FROM periods WHERE room_id LIKE 'smoke-%';
+    DELETE FROM expenses WHERE room_id LIKE 'smoke-%';
+    DELETE FROM memberships WHERE room_id LIKE 'smoke-%' OR user_id IN (SELECT id FROM users WHERE username LIKE 'smoke-%');
+    DELETE FROM members WHERE room_id LIKE 'smoke-%';
+    DELETE FROM settings WHERE room_id LIKE 'smoke-%';
+    DELETE FROM invites WHERE room_id LIKE 'smoke-%';
+    DELETE FROM sessions WHERE room_id LIKE 'smoke-%';
+    DELETE FROM rooms WHERE room_id LIKE 'smoke-%';
+    DELETE FROM user_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'smoke-%');
+    DELETE FROM users WHERE username LIKE 'smoke-%';
+    DELETE FROM auth_throttle WHERE key LIKE 'login:smoke-%' OR key LIKE 'pin:smoke-%';" >/dev/null 2>&1
+}
+purge
+trap 'purge; echo "  (đã dọn phòng/user smoke)"' EXIT
+
+api() { # api METHOD PATH [json] [bearer]
+  local m=$1 p=$2 j=${3:-} b=${4:-}
+  local args=(-s --max-time 40 -X "$m" -w '\n%{http_code}' "$API$p" -H 'Content-Type: application/json')
   [ -n "$b" ] && args+=(-H "Authorization: Bearer $b")
   [ -n "$j" ] && args+=(-d "$j")
   local out; out="$(curl "${args[@]}")"
@@ -36,304 +58,278 @@ api() { # api METHOD PATH [json] [admin-hash] [bearer]
   BODY="${out%$'\n'*}"
 }
 
-# get <duong-dan> - theo 'a.b.0.c'; in '' neu khong co
-get() { python3 -c "
-import json,sys
-try: d=json.loads(sys.argv[1])
-except Exception: sys.exit(0)
-for k in sys.argv[2].split('.'):
-    if isinstance(d,list):
-        try: d=d[int(k)]
-        except Exception: d=None
-    elif isinstance(d,dict): d=d.get(k)
-    else: d=None
+get() {
+  BODY="$BODY" python3 - "$1" <<'PY'
+import json, os, sys
+path = sys.argv[1].split('.') if sys.argv[1] else []
+try:
+    d = json.loads(os.environ.get('BODY') or '{}')
+except Exception:
+    print(''); raise SystemExit
+for k in path:
     if d is None: break
-print('' if d is None else (json.dumps(d) if isinstance(d,(list,dict,bool)) else d))" "$BODY" "$1"; }
-
-ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
-bad() { echo "  FAIL  $1  -> HTTP $HTTP_CODE · ${BODY:0:180}"; FAIL=$((FAIL+1)); }
-expect(){ # expect <mo-ta> <http-mong-doi>
-  if [ "$HTTP_CODE" = "$2" ]; then ok "$1 ($2)"; else bad "$1 (muon $2)"; fi
-}
-expect_field(){ # expect_field <mo-ta> <duong-dan> <gia-tri-mong-doi>
-  local v; v="$(get "$2")"
-  if [ "$v" = "$3" ]; then ok "$1"; else bad "$1: '$v' != '$3'"; fi
-}
-# hasval <mang> <truong> <gia-tri> -> 1 khi co mot phan tu cua mang co truong bang gia tri
-hasval() { python3 -c "
-import json,sys
-try: d=json.loads(sys.argv[1])
-except Exception: print(0); raise SystemExit
-arr=d.get(sys.argv[2]) or []
-print(1 if any(str(x.get(sys.argv[3]))==sys.argv[4] for x in arr) else 0)" "$BODY" "$1" "$2" "$3"; }
-expect_has(){ # expect_has <mo-ta> <mang> <truong> <gia-tri>
-  local v; v="$(hasval "$2" "$3" "$4")"
-  if [ "$v" = 1 ]; then ok "$1"; else bad "$1: không tìm thấy '$3=$4' trong $2"; fi
-}
-expect_len(){ # expect_len <mo-ta> <mang> <so-phan-tu-mong-doi>
-  local v; v="$(python3 -c "
-import json,sys
-try: d=json.loads(sys.argv[1])
-except Exception: print(-1); raise SystemExit
-print(len(d.get(sys.argv[2]) or []))" "$BODY" "$2")"
-  if [ "$v" = "$3" ]; then ok "$1"; else bad "$1: count=$v mong=$3"; fi
+    if isinstance(d, list):
+        try:
+            d = d[int(k)]
+        except Exception:
+            d = None; break
+    else:
+        d = d.get(k)
+if d is True: print('true')
+elif d is False: print('false')
+elif d is None: print('')
+else: print(d)
+PY
 }
 
-purge() {
-  # Quet theo prefix 'smoke-a-'/'smoke-b-' (khong dung ten day du) de don ca
-  # phong sot lai tu nhung lan chay cu, va khong an loi cua wrangler nua.
-  npx wrangler d1 execute "$DB_NAME" --local --command="
-    DELETE FROM member_shares WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';
-    DELETE FROM periods WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';
-    DELETE FROM expenses WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';
-    DELETE FROM members WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';
-    DELETE FROM settings WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';
-    DELETE FROM invites WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';
-    DELETE FROM sessions WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';
-    DELETE FROM rooms WHERE room_id LIKE '%smoke-a-%' OR room_id LIKE '%smoke-b-%' OR room_id LIKE '%smoke-c-%';" 2>&1 | grep -c '"success": true' | sed 's/^/  purge: \/8 statement OK -> /'
+expect() {
+  local name=$1 want=$2
+  if [ "$HTTP_CODE" = "$want" ]; then
+    PASS=$((PASS+1)); echo "  ok   $name"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL $name -> HTTP $HTTP_CODE (want $want): $BODY"
+  fi
 }
-trap 'purge; echo "  (đã dọn $RA / $RB / $RC)"' EXIT
 
-if ! curl -s --max-time 3 -o /dev/null "$API/api/data"; then
-  echo "Không gọi được $API - chạy 'npm run build' rồi 'npm run dev:server' trước."; exit 2
-fi
-purge
+expect_field() {
+  local name=$1 path=$2 want=$3 got
+  got="$(get "$path")"
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS+1)); echo "  ok   $name"
+  else
+    FAIL=$((FAIL+1)); echo "  FAIL $name -> '$got' (want '$want'): $BODY"
+  fi
+}
 
-echo "== 0. tuong lui: thieu ?p van ra phong cu =="
-api GET /api/data
-expect "GET /api/data 200" 200
-expect_field "thieu ?p => phong-2a" room_id phong-2a
+echo "== 1. tài khoản =="
+api POST /api/auth/register "{\"username\":\"$U_A\",\"password\":\"$PW_A\",\"display_name\":\"Alice\"}"
+expect "đăng ký tài khoản" 200
+TOK_A="$(get token)"
+expect_field "trả về username" user.username "$U_A"
+api POST /api/auth/register "{\"username\":\"$U_A\",\"password\":\"$PW_A\"}"
+expect "trùng username => 409" 409
+api POST /api/auth/register '{"username":"ab","password":"12345678"}'
+expect "username quá ngắn => 400" 400
+api POST /api/auth/register "{\"username\":\"smoke-short-$NS\",\"password\":\"short\"}"
+expect "mật khẩu ngắn => 400" 400
+api POST /api/auth/login "{\"username\":\"$U_A\",\"password\":\"wrong-pass\"}"
+expect "sai mật khẩu => 401" 401
+api POST /api/auth/login "{\"username\":\"$U_A\",\"password\":\"$PW_A\"}"
+expect "đăng nhập đúng => 200" 200
+TOK_A="$(get token)"
+api GET /api/auth/me
+expect "auth/me không phiên => 401" 401
+expect_field "báo cần đăng nhập" needs_auth true
+api GET /api/auth/me '' "$TOK_A"
+expect "auth/me có phiên => 200" 200
+expect_field "user.username khớp" user.username "$U_A"
 
-echo "== 1. tu tao phong =="
-api POST /api/rooms "{\"name\":\"Phòng Smoke A $NS\",\"pin_hash\":\"$HASH_A\",\"owner_name\":\"Chu Phong A\"}"
-expect "POST /api/rooms 200" 200
-expect_field "slug sinh tu ten (bo dau)" room_id "$RA"
-api POST /api/rooms "{\"name\":\"Phòng Smoke B $NS\",\"pin_hash\":\"$HASH_B\",\"owner_name\":\"Chu Phong B\"}"
-expect "tao phong thu hai 200" 200
-api POST /api/rooms "{\"name\":\"Phòng Smoke A $NS\",\"pin_hash\":\"$HASH_A\"}"
-expect "ten trung => 409" 409
-api POST /api/rooms '{"name":"x","pin_hash":"deadbeef"}'
-expect "ten qua ngan / pin sai dinh dang => 400" 400
+echo "== 2. chống dò mật khẩu =="
+api POST /api/auth/register "{\"username\":\"$U_T\",\"password\":\"$PW_T\"}"
+expect "tạo user throttle" 200
+for i in 1 2 3 4 5; do
+  api POST /api/auth/login "{\"username\":\"$U_T\",\"password\":\"bad-password\"}"
+done
+expect "5 lần sai liên tiếp vẫn 401" 401
+api POST /api/auth/login "{\"username\":\"$U_T\",\"password\":\"bad-password\"}"
+expect "lần sai thứ 6 bị khóa => 429" 429
+
+echo "== 3. phòng + đọc dữ liệu =="
+api POST /api/rooms "{\"name\":\"Smoke A $NS\",\"pin\":\"123123\",\"owner_name\":\"Alice Chủ\"}" "$TOK_A"
+expect "tạo phòng A => 200" 200
+RA="$(get room.room_id)"
+expect_field "room_id là slug" room.room_id "smoke-a-$NS"
+expect_field "người tạo là chủ" room.role owner
+api POST /api/rooms "{\"name\":\"Smoke B $NS\",\"pin\":\"456456\"}" "$TOK_A"
+expect "tạo phòng B => 200" 200
+RB="$(get room.room_id)"
 api GET "/api/data?p=$RA"
-expect_field "phong moi co 1 thanh vien chu" 'members.0.name' 'Chu Phong A'
-api GET "/api/data?p=phong-khong-ton-tai"
-expect "phong khong ton tai => 404" 404
-expect_field "404 kem need_invite" need_invite true
-api GET "/api/data?p=PHONG%20SAI"
-expect "slug sai cu phap => 400" 400
+expect "GET /api/data không phiên => 401" 401
+api GET "/api/data?p=$RA" '' "$TOK_A"
+expect "GET /api/data có phiên => 200" 200
+expect_field "me.role owner" me.role owner
+expect_field "me.is_owner" me.is_owner true
+expect_field "payload KHÔNG trả admin_pin_hash" settings.admin_pin_hash ""
 
-echo "== 2. PIN rieng tung phong =="
-api POST "/api/admin/verify?p=$RA" "{\"pin_hash\":\"$HASH_A\"}"
-expect_field "PIN dung cua A" valid true
-api POST "/api/admin/verify?p=$RA" "{\"pin_hash\":\"$HASH_B\"}"
-expect_field "PIN cua B khong dung duoc o A" valid false
-api POST "/api/admin/periods?p=$RA" '{"id":"2026-11","title":"T"}' "$HASH_B"
-expect "ghi A bang PIN B => 401" 401
-# phong cu (chua migrate PIN) khong con accept hash mac dinh 123456 neu DB loi; o day
-# phong-2a van giu hash cu trong settings nen khong doan duoc dieu nay - kiem tra thu cong.
+echo "== 4. thành viên + link mời 3 mức =="
+api POST "/api/admin/members?p=$RA" "{\"name\":\"Thành Viên Một\",\"nickname\":\"M1\",\"phone\":\"0900000001\"}" "$TOK_A"
+expect "thêm M1" 200
+M1="$(get id)"
+api POST "/api/admin/members?p=$RA" "{\"name\":\"Thành Viên Hai\",\"nickname\":\"M2\",\"phone\":\"0900000002\"}" "$TOK_A"
+expect "thêm M2" 200
+M2="$(get id)"
+api POST "/api/admin/members?p=$RA" "{\"name\":\"Thành Viên Ba\",\"nickname\":\"M3\"}" "$TOK_A"
+expect "thêm M3" 200
+M3="$(get id)"
+api POST "/api/admin/members?p=$RA" "{\"name\":\"Thành Viên Bốn\",\"nickname\":\"M4\"}" "$TOK_A"
+expect "thêm M4" 200
+M4="$(get id)"
 
-echo "== 3. XUNG DOT KY: hai phong cung tao 2026-11 (loi #1 trong plan) =="
-api POST "/api/admin/periods?p=$RA" '{"id":"2026-11","title":"Tháng 11/2026 A"}' "$HASH_A"
-expect "A tao ky 2026-11" 200
-api POST "/api/admin/periods?p=$RB" '{"id":"2026-11","title":"Tháng 11/2026 B"}' "$HASH_B"
-expect "B tao CUNG ky 2026-11" 200
-api GET "/api/data?p=$RA"; MEMA="$(get 'members.0.id')"
-api GET "/api/data?p=$RB"; MEMB="$(get 'members.0.id')"
-if [ -z "$MEMA" ] || [ -z "$MEMB" ]; then
-  bad "khong lay duoc member_id cua hai phong scratch ($MEMA / $MEMB) - dung test"
-  echo; echo "===== KET QUA: $PASS pass / $FAIL fail ====="; exit 1
-fi
-ok "lay duoc member_id cua ca hai phong"
-api POST "/api/admin/toggle-share-paid?p=$RA" "{\"period_id\":\"2026-11\",\"member_id\":\"$MEMA\",\"is_paid\":1,\"paid_amount\":250000}" "$HASH_A"
-expect "A ghi share 250k" 200
-api POST "/api/admin/toggle-share-paid?p=$RB" "{\"period_id\":\"2026-11\",\"member_id\":\"$MEMB\",\"is_paid\":0,\"paid_amount\":1}" "$HASH_B"
-expect "B ghi share 1d" 200
-api GET "/api/data?p=$RA"
-expect_field "share CUA A khong bi B de" 'member_shares.0.paid_amount' 250000
-expect_field "A khong thay member cua B" 'members.0.name' 'Chu Phong A'
-api GET "/api/data?p=$RB"
-expect_field "share CUA B van la 1d (khong bi A de)" 'member_shares.0.paid_amount' 1
+api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$M1\",\"role\":\"viewer\"}" "$TOK_A"
+expect "tạo link viewer" 200
+INV1="$(get token)"
+expect_field "link mang quyền viewer" role viewer
+api GET "/api/invites/$INV1"
+expect "xem trước link không cần đăng nhập => 200" 200
+expect_field "preview đúng người" member_name "Thành Viên Một"
+expect_field "preview đúng quyền" role viewer
 
-echo "== 4. member id cua phong khac bi chan (chong re-parent) =="
-api POST "/api/admin/members?p=$RA" "{\"id\":\"$MEMB\",\"name\":\"đánh cắp\"}" "$HASH_A"
-expect "upsert member cua B vao A => 409" 409
-api GET "/api/data?p=$RB"
-expect_field "B van con member cua minh" 'members.0.name' 'Chu Phong B'
+api POST /api/auth/register "{\"username\":\"$U_B\",\"password\":\"$PW_B\",\"display_name\":\"Bob\"}"
+expect "đăng ký Bob" 200
+TOK_B="$(get token)"
+api POST /api/invites/claim "{\"token\":\"$INV1\"}" "$TOK_B"
+expect "Bob nhận link viewer => 200" 200
+expect_field "role nhận được là viewer" role viewer
+api POST /api/invites/claim "{\"token\":\"$INV1\"}" "$TOK_B"
+expect "dùng lại link đã nhận => 410" 410
+api GET "/api/data?p=$RA" '' "$TOK_B"
+expect "viewer đọc được sổ" 200
+expect_field "viewer có me.role viewer" me.role viewer
+expect_field "viewer không thấy SĐT người khác" members.2.phone ""
+expect_field "thành viên đã nhận tài khoản" members.1.has_account true
 
-echo "== 5. link moi (single-use) =="
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA\",\"ttl_min\":15,\"uses\":1}" "$HASH_A"
-expect "tao link 200" 200
-TOKEN="$(get token)"
-[ -n "$TOKEN" ] && ok "token tra ve 1 lan (${#TOKEN} ký tự)" || bad "thieu token"
-expect_field "tuoi link 15 phut" ttl_min 15
-api POST "/api/admin/invites?p=$RA" '{"member_id":"mem-khong-co-that"}' "$HASH_A"
-expect "moi cho member la => 404" 404
+echo "== 5. viewer bị chặn ghi =="
+api POST "/api/member/toggle-share-paid?p=$RA" '{"period_id":"2026-10","is_paid":true}' "$TOK_B"
+expect "viewer tự tick => 403" 403
+api POST "/api/admin/expenses?p=$RA" "{\"title\":\"Điện\",\"amount\":100000,\"period_id\":\"2026-10\"}" "$TOK_B"
+expect "viewer ghi khoản => 403" 403
+api POST "/api/admin/settings?p=$RA" '{"room_name":"Hack"}' "$TOK_B"
+expect "viewer đổi cài đặt => 403" 403
+api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$M2\"}" "$TOK_B"
+expect "viewer mời người => 403" 403
+api POST "/api/admin/members?p=$RA" '{"name":"Người Lạ"}' "$TOK_B"
+expect "viewer thêm thành viên => 403" 403
 
-echo "== 6. join + session =="
-api POST /api/join "{\"token\":\"$TOKEN\",\"name\":\"Người Được Mời\"}"
-expect "join lan 1 => 200" 200
-SESSION="$(get 'session.token')"
-expect_field "join tra dung room_id" room_id "$RA"
-expect_field "join cap nhat ten member" 'member_name' 'Người Được Mời'
-api POST /api/join "{\"token\":\"$TOKEN\"}"
-expect "dung link lan 2 => 410" 410
-api POST /api/join '{"token":"quan-ngan"}'
-expect "token qua ngan => 400" 400
-api GET "/api/data?p=$RA"
-expect_field "member da claim ten qua link" 'members.0.name' 'Người Được Mời'
+echo "== 6. rời phòng / ngưng hoạt động giữ lịch sử =="
+api POST "/api/rooms/leave?p=$RA" '{}' "$TOK_B"
+expect "viewer tự rời phòng => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_B"
+expect "rời xong mất quyền đọc ngay => 403" 403
+api GET "/api/data?p=$RA" '' "$TOK_A"
+expect_field "người đã rời vẫn nằm trong sổ" members.1.is_active 0
+api POST "/api/admin/members/$M1/reactivate?p=$RA" '' "$TOK_A"
+expect "thêm lại người đã rời => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_B"
+expect "tài khoản cũ đọc lại được (membership giữ nguyên) => 200" 200
 
-echo "== 7. me + tu tick da nop (khong can PIN admin) =="
-api GET "/api/me?p=$RA" '' '' "$SESSION"
-expect "GET /api/me => 200" 200
-expect_field "me dung member_id" member_id "$MEMA"
-expect_field "role cua me" role member
-api POST "/api/member/toggle-share-paid?p=$RA" '{"period_id":"2026-11","is_paid":1,"paid_amount":90000}' '' "$SESSION"
-expect "member tu tick => 200" 200
-api GET "/api/data?p=$RA"
-expect_field "server ghi dung so member tu khai" 'member_shares.0.paid_amount' 90000
-api POST "/api/member/toggle-share-paid?p=$RB" '{"period_id":"2026-11","is_paid":1}' '' "$SESSION"
-expect "session A dung o B => 403" 403
-api GET "/api/me?p=$RA" '' '' 'token-khong-co-that'
-expect "token la => 401" 401
-api POST "/api/member/toggle-share-paid?p=$RA" '{"period_id":"khong-phai-ky","is_paid":1}' '' "$SESSION"
-expect "ky sai dinh dang => 400" 400
+echo "== 7. member tự tick, không ghi sổ =="
+api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$M2\",\"role\":\"member\"}" "$TOK_A"
+expect "tạo link member" 200
+INV2="$(get token)"
+api POST /api/auth/register "{\"username\":\"$U_C\",\"password\":\"$PW_C\",\"display_name\":\"Carol\"}"
+expect "đăng ký Carol" 200
+TOK_C="$(get token)"
+api POST /api/invites/claim "{\"token\":\"$INV2\"}" "$TOK_C"
+expect "Carol nhận link member => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_C"
+expect_field "Carol là member" me.role member
+api POST "/api/member/toggle-share-paid?p=$RA" '{"period_id":"2026-10","is_paid":true,"paid_amount":50000}' "$TOK_C"
+expect "member tự tick phần mình => 200" 200
+api POST "/api/admin/toggle-share-paid?p=$RA" "{\"period_id\":\"2026-10\",\"member_id\":\"$M3\",\"is_paid\":true}" "$TOK_C"
+expect "member tick hộ người khác => 403" 403
+api POST "/api/admin/expenses?p=$RA" "{\"title\":\"Nước\",\"amount\":20000,\"period_id\":\"2026-10\"}" "$TOK_C"
+expect "member ghi khoản => 403" 403
+api GET "/api/data?p=$RA" '' "$TOK_A"
+expect_field "khoản Carol đã tick lưu đúng member" member_shares.0.member_id "$M2"
+expect_field "số tiền từng phần lưu đúng" member_shares.0.paid_amount 50000
 
-echo "== 8. da nguoi khoi phong =="
-api POST "/api/admin/revoke?p=$RA" "{\"member_id\":\"$MEMA\"}" "$HASH_A"
-expect "revoke => 200" 200
-api GET "/api/me?p=$RA" '' '' "$SESSION"
-expect "request ke tiep => 401" 401
-expect_field "ly do thu hoi" reason revoked
-api POST "/api/member/toggle-share-paid?p=$RA" '{"period_id":"2026-11","is_paid":1}' '' "$SESSION"
-expect "ghi bi chan sau revoke => 401" 401
+echo "== 8. manager: ghi sổ được, cài đặt thì không =="
+api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$M3\",\"role\":\"manager\"}" "$TOK_A"
+expect "chủ tạo link manager" 200
+INV3="$(get token)"
+api POST /api/auth/register "{\"username\":\"$U_D\",\"password\":\"$PW_D\",\"display_name\":\"Dave\"}"
+expect "đăng ký Dave" 200
+TOK_D="$(get token)"
+api POST /api/invites/claim "{\"token\":\"$INV3\"}" "$TOK_D"
+expect "Dave nhận link manager => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_D"
+expect_field "Dave là manager" me.role manager
+api POST "/api/admin/expenses?p=$RA" "{\"title\":\"Wifi\",\"amount\":90000,\"period_id\":\"2026-10\"}" "$TOK_D"
+expect "manager ghi khoản => 200" 200
+api POST "/api/admin/settings?p=$RA" '{"room_name":"Hack"}' "$TOK_D"
+expect "manager đổi cài đặt => 403" 403
+api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$M4\",\"role\":\"manager\"}" "$TOK_D"
+expect "manager tạo link manager => 403" 403
+api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$M4\",\"role\":\"viewer\"}" "$TOK_D"
+expect "manager tạo link viewer => 200" 200
+INV4="$(get token)"
+api POST "/api/admin/periods?p=$RA" "{\"id\":\"period_smoke_$NS\",\"title\":\"Kỳ Smoke\"}" "$TOK_D"
+expect "manager tạo kỳ => 200" 200
+api DELETE "/api/admin/periods/period_smoke_$NS?p=$RA" '' "$TOK_D"
+expect "manager xóa kỳ => 403" 403
+api DELETE "/api/admin/periods/period_smoke_$NS?p=$RA" '' "$TOK_A"
+expect "chủ xóa kỳ => 200" 200
+api POST "/api/admin/members/$M1/deactivate?p=$RA" '' "$TOK_D"
+expect "manager ngưng người cấp dưới => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_B"
+expect "bị ngưng thì mất quyền đọc ngay => 403" 403
+api POST "/api/admin/members/$M1/reactivate?p=$RA" '' "$TOK_D"
+expect "manager thêm lại người cấp dưới => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_B"
+expect "thêm lại thì đọc lại được => 200" 200
 
-echo "== 9. link het han =="
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA\",\"ttl_min\":1}" "$HASH_A"
-T2="$(get token)"
-npx wrangler d1 execute "$DB_NAME" --local --command="UPDATE invites SET expires_at='2020-01-01T00:00:00Z' WHERE room_id='$RA';" >/dev/null 2>&1
-api POST /api/join "{\"token\":\"$T2\"}"
-expect "link qua han => 410" 410
+echo "== 9. giao phòng + rời phòng =="
+api POST "/api/rooms/leave?p=$RA" '{}' "$TOK_A"
+expect "chủ phòng tự rời => 409" 409
+api POST "/api/admin/transfer-owner?p=$RA" "{\"member_id\":\"$M4\"}" "$TOK_A"
+expect "giao cho người chưa có tài khoản => 409" 409
+api POST /api/invites/claim "{\"token\":\"$INV4\"}" "$TOK_C"
+expect "người đã là thành viên nhận link khác => 409" 409
+api POST /api/auth/register "{\"username\":\"$U_F\",\"password\":\"$PW_F\",\"display_name\":\"Frank\"}"
+expect "đăng ký Frank" 200
+TOK_F="$(get token)"
+api POST /api/invites/claim "{\"token\":\"$INV4\"}" "$TOK_F"
+expect "Frank nhận link viewer => 200" 200
+api POST "/api/admin/transfer-owner?p=$RA" "{\"member_id\":\"$M2\"}" "$TOK_A"
+expect "giao phòng cho người có tài khoản => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_A"
+expect_field "chủ cũ hạ xuống manager" me.role manager
+api POST "/api/rooms/leave?p=$RA" '{}' "$TOK_A"
+expect "chủ cũ rời phòng sau khi giao => 200" 200
+api GET "/api/data?p=$RA" '' "$TOK_A"
+expect "chủ cũ mất quyền đọc => 403" 403
+api GET "/api/data?p=$RA" '' "$TOK_C"
+expect_field "chủ mới là owner" me.role owner
+api POST "/api/rooms/leave?p=$RA" '{}' "$TOK_C"
+expect "chủ mới tự rời => 409" 409
 
-echo "== 10. tao link moi vo hieu hoa link cu =="
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA\"}" "$HASH_A"
-T3="$(get token)"
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA\"}" "$HASH_A"
-T4="$(get token)"
-api POST /api/join "{\"token\":\"$T3\"}"
-expect "link cu bi thay the => 410/404" 404
+echo "== 10. khôi phục chủ phòng bằng PIN =="
+api POST "/api/rooms/recover-owner?p=$RB" "{\"pin\":\"999999\",\"new_pin\":\"654654\",\"username\":\"$U_R\",\"password\":\"$PW_R\"}"
+expect "sai PIN => 403" 403
+api POST "/api/rooms/recover-owner?p=$RB" "{\"pin\":\"456456\",\"new_pin\":\"654654\",\"username\":\"$U_R\",\"password\":\"$PW_R\"}"
+expect "đúng PIN => 200" 200
+TOK_R="$(get token)"
+expect_field "tài khoản khôi phục là chủ" role owner
+MB_OWNER="$(get member_id)"
+api GET "/api/data?p=$RB" '' "$TOK_R"
+expect "phiên khôi phục đọc được phòng" 200
+expect_field "me.is_owner" me.is_owner true
+expect_field "chủ phòng cũ (owner member) giữ nguyên" me.member_id "$MB_OWNER"
+api GET "/api/data?p=$RB" '' "$TOK_A"
+expect "tài khoản cũ mất phòng B => 403" 403
+api POST "/api/rooms/recover-owner?p=$RB" "{\"pin\":\"456456\",\"new_pin\":\"111111\",\"username\":\"$U_R\",\"password\":\"$PW_R\"}"
+expect "PIN cũ đã chết => 403" 403
+for i in 1 2 3 4; do
+  api POST "/api/rooms/recover-owner?p=$RB" "{\"pin\":\"456456\",\"new_pin\":\"111111\",\"username\":\"$U_R\",\"password\":\"$PW_R\"}"
+done
+expect "5 lần sai PIN liên tiếp => 403" 403
+api POST "/api/rooms/recover-owner?p=$RB" "{\"pin\":\"456456\",\"new_pin\":\"111111\",\"username\":\"$U_R\",\"password\":\"$PW_R\"}"
+expect "lần sai thứ 6 => 429" 429
+api POST /api/auth/login "{\"username\":\"$U_R\",\"password\":\"$PW_R\"}"
+expect "tài khoản khôi phục đăng nhập được" 200
 
-echo "== 11. schema 003: duong ghi khong bi 503 nua =="
-api POST "/api/admin/periods?p=$RB" '{"id":"2026-12","title":"Tháng 12/2026 B"}' "$HASH_B"
-expect "ghi sau khi migrate 003 => 200 (khong 503)" 200
+echo "== 11. endpoint PIN cũ đã bị xóa =="
+api POST /api/join '{"token":"whatever"}' "$TOK_R"
+expect "/api/join => 404" 404
+api POST /api/admin/verify '{}' "$TOK_R"
+expect "/api/admin/verify => 404" 404
+api POST "/api/admin/members/$M1/deactivate?p=$RA" '' "$TOK_R"
+expect "người ngoài phòng không thao tác được => 403" 403
 
-echo "== 12. ba muc quyen cua link moi =="
-api POST "/api/admin/members?p=$RA" '{"name":"Thành Viên Hai"}' "$HASH_A"
-expect "them thanh vien thu 2 vao A" 200
-MEMA2="$(get id)"
-api GET "/api/data?p=$RA"
-expect_field "chong phong duoc stamp dung chu" owner_member_id "$MEMA"
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA2\",\"role\":\"viewer\"}" "$HASH_A"
-expect "moi muc viewer => 200" 200
-expect_field "link ghi role viewer" role viewer
-TV="$(get token)"
-api POST /api/join "{\"token\":\"$TV\"}"
-expect "join bang link viewer => 200" 200
-expect_field "role tu link vao phien" role viewer
-SV="$(get 'session.token')"
-api GET "/api/me?p=$RA" '' '' "$SV"
-expect_field "GET /api/me tra role viewer" role viewer
-api POST "/api/member/toggle-share-paid?p=$RA" '{"period_id":"2026-11","is_paid":1}' '' "$SV"
-expect "viewer tu tick => 403" 403
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA2\",\"role\":\"manager\"}" "$HASH_A"
-expect "moi muc manager => 200" 200
-TM="$(get token)"
-api POST /api/join "{\"token\":\"$TM\"}"
-expect "join bang link manager => 200" 200
-SM="$(get 'session.token')"
-
-echo "== 13. manager: moi + thu hoi duoc, sua sổ khong =="
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA\"}" '' "$SM"
-expect "manager tao link chi bang Bearer (khong PIN) => 200" 200
-expect_field "mac dinh cua link manager la member" role member
-api POST "/api/admin/settings?p=$RA" '{"room_name":"đổi tráo"}' '' "$SM"
-expect "manager ghi settings => 401" 401
-api POST "/api/admin/periods?p=$RA" '{"id":"2027-01","title":"x"}' '' "$SM"
-expect "manager tao ky => 401" 401
-api POST "/api/admin/expenses?p=$RA" '{"title":"x","amount":1000,"category":"nuoc","period_id":"2026-11"}' '' "$SM"
-expect "manager them khoan chi => 401" 401
-api GET "/api/data?p=$RA"
-expect_field "khong ghi duoc nen setting khong doi" 'settings.room_name' "Phòng Smoke A $NS"
-expect_len "khong ky naò lem vào phòng A" periods 1
-api POST "/api/admin/revoke?p=$RA" "{\"member_id\":\"$MEMA2\"}" '' "$SM"
-expect "manager thu hoi phien cua chinh no => 200" 200
-api GET "/api/me?p=$RA" '' '' "$SM"
-expect "phien manager chet ngay sau do => 401" 401
-expect_field "ly do thu hoi" reason revoked
-
-echo "== 14. chu phong khong tu xoa duoc minh =="
-api DELETE "/api/admin/members/$MEMA?p=$RA" '' "$HASH_A"
-expect "xoa chu phong => 409" 409
-api GET "/api/data?p=$RA"
-expect_has "chu phong van con trong so" members id "$MEMA"
-
-echo "== 15. ngung hoat dong gi lai lịch sử tien =="
-api POST "/api/admin/toggle-share-paid?p=$RA" "{\"period_id\":\"2026-11\",\"member_id\":\"$MEMA2\",\"is_paid\":1,\"paid_amount\":400000}" "$HASH_A"
-expect "ghi phien cua thanh vien 2" 200
-api GET "/api/data?p=$RA"
-SHARES_BEFORE="$(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])['member_shares']))" "$BODY")"
-api DELETE "/api/admin/members/$MEMA2?p=$RA" '' "$HASH_A"
-expect "ngung hoat dong => 200" 200
-expect_field "server noi ro la ngung chu khong phai xoa" deactivated true
-api GET "/api/data?p=$RA"
-expect_has "nhan vat da roi van con trong dan sach ky cu" members id "$MEMA2"
-expect_len "số phần chưa giảm khi có người rời" member_shares "$SHARES_BEFORE"
-expect_has "phần tiền 400k của người rời còn nguyên" member_shares member_id "$MEMA2"
-
-echo "== 16. ro phong: bang phien va bang PIN =="
-api POST "/api/admin/members?p=$RA" '{"name":"Người Rời"}' "$HASH_A"
-MEMA3="$(get id)"
-api POST "/api/admin/invites?p=$RA" "{\"member_id\":\"$MEMA3\"}" "$HASH_A"
-T5="$(get token)"
-api POST /api/join "{\"token\":\"$T5\"}"
-expect "Người Rời vào phòng bang link" 200
-S5="$(get 'session.token')"
-api POST "/api/rooms/leave?p=$RA" '{}' '' "$S5"
-expect "ro phong bang phien => 200" 200
-expect_field "server ghi ro là tự rời, không phải bị xóa" left true
-api GET "/api/me?p=$RA" '' '' "$S5"
-expect "phien het hieu luc ngay sau khi ro => 401" 401
-api GET "/api/data?p=$RA"
-expect_has "người đã ro vẫn còn trong kỳ cu" members id "$MEMA3"
-api POST "/api/rooms/leave?p=$RA" "{\"member_id\":\"$MEMA\"}" "$HASH_A"
-expect "chủ phòng ro bang PIN => 409" 409
-api POST "/api/admin/transfer-owner?p=$RA" "{\"member_id\":\"$MEMA2\"}" "$HASH_A"
-expect "giao phong cho người đã ngung => 409" 409
-api POST "/api/admin/members?p=$RA" "{\"id\":\"$MEMA2\",\"name\":\"Thành Viên Hai\",\"is_active\":1}" "$HASH_A"
-expect "them lại người đã ro" 200
-api POST "/api/admin/transfer-owner?p=$RA" "{\"member_id\":\"$MEMA2\"}" "$HASH_A"
-expect "giao phong cho người đang hoat dong => 200" 200
-api GET "/api/data?p=$RA"
-expect_field "chủ mới nằm trong rooms" owner_member_id "$MEMA2"
-api POST "/api/rooms/leave?p=$RA" "{\"member_id\":\"$MEMA\"}" "$HASH_A"
-expect "chủ cu ro duoc sau khi giao phong => 200" 200
-
-echo "== 17. phòng khong duoc mat người cuoi cung =="
-api POST /api/rooms "{\"name\":\"Phòng Smoke C $NS\",\"pin_hash\":\"$HASH_C\"}"
-expect "tao phong C khong dat chu phong" 200
-expect_field "slug phong C" room_id "$RC"
-api POST "/api/admin/members?p=$RC" '{"name":"Người Một"}' "$HASH_C"
-expect "them người 1" 200
-C1="$(get id)"
-api POST "/api/admin/members?p=$RC" '{"name":"Người Hai"}' "$HASH_C"
-C2="$(get id)"
-api DELETE "/api/admin/members/$C1?p=$RC" '' "$HASH_C"
-expect "con người khac nen ngung duoc => 200" 200
-api DELETE "/api/admin/members/$C2?p=$RC" '' "$HASH_C"
-expect "người active cuoi cung => 409" 409
-api POST "/api/rooms/leave?p=$RC" "{\"member_id\":\"$C2\"}" "$HASH_C"
-expect "ro phong bang PIN cung bi chan giong xoa => 409" 409
-api GET "/api/data?p=$RC"
-expect_has "người bi ngung van duoc liet ke" members id "$C1"
+echo "== 12. danh sách phòng của tài khoản =="
+api GET /api/auth/me '' "$TOK_A"
+expect "Alice vẫn đăng nhập được" 200
+expect_field "Alice không còn phòng nào" rooms.0.room_id ""
 
 echo
 echo "===== KET QUA: $PASS pass / $FAIL fail ====="

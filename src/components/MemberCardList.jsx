@@ -13,6 +13,9 @@ import confetti from 'canvas-confetti';
 export default function MemberCardList({
   memberCalculations = [],
   periodId = '',
+  myMemberId = '',
+  canTickSelf = false,
+  canManageAll = false,
   onOpenQr,
   onTogglePaid,
   onRecordPayment,
@@ -45,6 +48,8 @@ export default function MemberCardList({
       <div className="divide-y divide-slate-100">
         {memberCalculations.map((calc) => {
           const { member, sharedAmount, sharedItems = [], personalTotal, personalItems, totalAmount, paidAmount = 0, remaining = 0, isPartial, isPaid } = calc;
+          // member chỉ tick được dòng của mình; manager+ tick được mọi dòng.
+          const canActRow = canManageAll || (canTickSelf && member.id === myMemberId);
 
           return (
             <div
@@ -120,6 +125,8 @@ export default function MemberCardList({
                 </div>
 
                 {/* Status Toggle Icon Button */}
+                {canActRow && (
+                  <>
                 <button
                   onClick={() => handleToggle(member.id, totalAmount, isPaid)}
                   className={`p-1.5 rounded-xl transition-all ${
@@ -154,6 +161,8 @@ export default function MemberCardList({
                 >
                   <HandCoins className="w-4 h-4 stroke-[2.5]" />
                 </button>
+                  </>
+                )}
 
                 {/* VietQR Icon Button */}
                 <button
