@@ -108,7 +108,7 @@ function deriveTransferCode(slug) {
 // Thay cho cờ `isMigrated` cũ: cờ đó set true kể cả khi ALTER thất bại, nên một isolate
 // đã "khuôn" là DB sẵn sàng dù thật ra thiếu cột. Ở đây chỉ cache khi D1 xác nhận đúng
 // version; lỗi thì lần request sau probe lại.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 let schemaReady = false;
 async function ensureSchema(db) {
   if (schemaReady || !db) return { ok: schemaReady || !db };
@@ -145,7 +145,7 @@ export async function onRequest(context) {
     // để window migrate không sinh ra lỗi "no such column" khó hiểu ở client.
     if (!schema.ok && method !== 'GET') {
       return jsonResponse(
-        { error: `Schema D1 chưa ở version ${SCHEMA_VERSION}. Chạy migrations/002_multitenancy.sql trước khi ghi.`, schemaError: schema.error },
+        { error: `Schema D1 chưa ở version ${SCHEMA_VERSION}. Chạy migrations/003_invite_roles.sql (theo thứ tự sau 002) trước khi ghi.`, schemaError: schema.error },
         503
       );
     }

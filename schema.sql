@@ -1,5 +1,8 @@
--- Cloudflare D1 - schema cho DB dựng mới, đã bao gồm migration 002 (đa phòng).
--- DB đang có dữ liệu thì chạy migrations/002_multitenancy.sql, không chạy file này.
+-- Cloudflare D1 - schema cho DB dựng mới, đã bao gồm toàn bộ migration (002 đa phòng,
+-- 003 link mời phân quyền). DB đang có dữ liệu thì chạy migrations/00N_*.sql theo thứ tự,
+-- KHÔNG chạy file này (nó DROP/CREATE lại từ đầu qua npm run db:schema:local).
+-- Hình dạng cuối của từng bảng phải khớp file migration tương ứng — smoke.sh chạy trên
+-- DB dựng từ file này nên lệch là test không còn phản ánh prod.
 --
 -- Mặc định room_id = 'phong-2a' chỉ là cầu nối cho code cũ (route.js chưa truyền
 -- room_id). PR2 ghi room_id tường minh ở mọi câu INSERT.
@@ -73,6 +76,9 @@ CREATE TABLE IF NOT EXISTS invites (
   token_hash TEXT PRIMARY KEY,
   room_id    TEXT NOT NULL,
   member_id  TEXT NOT NULL,
+  -- xem migrations/003_invite_roles.sql: DB dựng mới phải KHỚP HÊT prod đã migrate,
+  -- nếu không smoke.sh chạy trên local sẽ không phản ánh đúng prod.
+  role       TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('viewer', 'member', 'manager')),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   expires_at DATETIME NOT NULL,
   uses_left  INTEGER NOT NULL DEFAULT 1
@@ -99,7 +105,10 @@ CREATE TABLE IF NOT EXISTS schema_meta (
   version    INTEGER PRIMARY KEY,
   applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+-- DB dựng mới đã có sẵn hình dạng của version 3, stamp cả hai để MAX(version) khớp
+-- prod đi đường migration (002 -> 003).
 INSERT OR IGNORE INTO schema_meta (version) VALUES (2);
+INSERT OR IGNORE INTO schema_meta (version) VALUES (3);
 
 -- Seed phòng mặc định cho DB mới tinh.
 INSERT OR IGNORE INTO rooms (room_id, name) VALUES ('phong-2a', 'Phòng Trọ 2A');
