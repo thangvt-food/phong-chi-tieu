@@ -412,6 +412,12 @@ export default function App() {
     setIsQrOpen(true);
   };
 
+  // Thao tác trong phòng chỉ cần tải lại sổ. Chỉ giao phòng mới đổi danh sách
+  // phòng/badge của tài khoản nên mới phải hỏi lại /auth/me.
+  const refreshRoom = async () => {
+    await loadRoom(roomId);
+  };
+
   const refreshAll = async () => {
     await Promise.all([loadRoom(roomId), refreshMe()]);
   };
@@ -692,7 +698,8 @@ export default function App() {
         onClose={() => setIsAdminDashboardOpen(false)}
         data={data}
         me={me}
-        onDataRefresh={refreshAll}
+        onDataRefresh={refreshRoom}
+        onAuthRefresh={refreshAll}
       />
 
       <AddRoomModal

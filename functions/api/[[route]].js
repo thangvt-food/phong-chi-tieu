@@ -162,16 +162,23 @@ async function readUserSession(db, request) {
   const raw = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (!raw) return null;
   const tokenHash = await sha256Hex(raw);
-  const row = await db.prepare(
-    'SELECT user_id, expires_at, revoked_at FROM user_sessions WHERE token_hash = ?'
-  ).bind(tokenHash).first();
+  // Một lượt đọc cho cả phiên + tài khoản: mỗi request phòng đều đi qua đây,
+  // thêm một round trip D1 ở đây là thêm độ trễ cho mọi thao tác ghi.
+  const row = await db.prepare(`
+    SELECT us.user_id, us.expires_at, us.revoked_at,
+           u.id AS u_id, u.username, u.display_name
+      FROM user_sessions us
+      LEFT JOIN users u ON u.id = us.user_id
+     WHERE us.token_hash = ?
+  `).bind(tokenHash).first();
   if (!row) return { err: 'invalid' };
   if (row.revoked_at) return { err: 'revoked' };
   if (new Date(row.expires_at).getTime() <= Date.now()) return { err: 'expired' };
-  const user = await db.prepare('SELECT id, username, display_name FROM users WHERE id = ?')
-    .bind(row.user_id).first();
-  if (!user) return { err: 'invalid' };
-  return { user, tokenHash };
+  if (!row.u_id) return { err: 'invalid' };
+  return {
+    user: { id: row.u_id, username: row.username, display_name: row.display_name },
+    tokenHash,
+  };
 }
 
 // ---- Chống dò mật khẩu / PIN ----
@@ -214,29 +221,40 @@ async function getOwnerMemberId(db, roomId) {
 }
 
 // Đọc lại từ DB mỗi request: token không mang quyền, ngưng hoạt động là chặn ngay.
+// Một query duy nhất (room + membership + member) thay vì ba lượt nối tiếp — mọi
+// endpoint phòng đều qua đây trước khi chạm dữ liệu thật.
 async function roomGate(db, user, roomId, minRole = 'viewer') {
-  const room = await db.prepare(
-    'SELECT room_id, name, owner_member_id FROM rooms WHERE room_id = ?'
-  ).bind(roomId).first();
-  if (!room) {
+  const row = await db.prepare(`
+    SELECT r.room_id, r.name, r.owner_member_id,
+           m.id AS member_id, m.name AS member_name, m.nickname AS member_nickname,
+           m.phone AS member_phone, m.is_active AS member_active, ms.role AS member_role
+      FROM rooms r
+      LEFT JOIN memberships ms ON ms.room_id = r.room_id AND ms.user_id = ?
+      LEFT JOIN members m ON m.room_id = ms.room_id AND m.id = ms.member_id
+     WHERE r.room_id = ?
+  `).bind(user.id, roomId).first();
+  if (!row) {
     return { response: jsonResponse({ error: 'Phòng không tồn tại.', room_id: roomId }, 404) };
   }
-  const member = await db.prepare(`
-    SELECT m.id, m.name, m.nickname, m.phone, m.is_active, ms.role
-      FROM members m
-      JOIN memberships ms ON ms.room_id = m.room_id AND ms.member_id = m.id
-     WHERE m.room_id = ? AND ms.user_id = ?
-  `).bind(roomId, user.id).first();
-  if (!member) {
+  if (!row.member_id) {
     return {
       response: jsonResponse({ error: 'Bạn không phải thành viên của phòng này.', room_id: roomId }, 403),
     };
   }
-  if (!member.is_active) {
+  if (!row.member_active) {
     return {
       response: jsonResponse({ error: 'Bạn đã bị ngưng khỏi phòng này.', room_id: roomId, inactive: true }, 403),
     };
   }
+  const room = { room_id: row.room_id, name: row.name, owner_member_id: row.owner_member_id };
+  const member = {
+    id: row.member_id,
+    name: row.member_name,
+    nickname: row.member_nickname,
+    phone: row.member_phone,
+    is_active: row.member_active,
+    role: row.member_role,
+  };
   const isOwner = room.owner_member_id === member.id;
   const role = isOwner ? 'owner' : normalizeRole(member.role);
   if (ROLE_RANK[role] < ROLE_RANK[minRole]) {
@@ -663,9 +681,9 @@ export async function onRequest(context) {
     const user = session.user;
 
     // GET /api/auth/me - Tài khoản + danh sách phòng như "nhóm" trong app chat
+    // Không ghi last_seen_at ở đây: client gọi sau mỗi thao tác ghi, biến một lượt
+    // đọc thành một lượt ghi D1 trong khi chưa dùng tới cột đó.
     if (path === 'auth/me' && method === 'GET') {
-      await db.prepare('UPDATE user_sessions SET last_seen_at = ? WHERE token_hash = ?')
-        .bind(new Date().toISOString(), session.tokenHash).run();
       const rows = await db.prepare(`
         SELECT ms.room_id, ms.member_id, ms.role, m.name AS member_name,
                r.name AS room_name, r.owner_member_id
@@ -821,8 +839,9 @@ export async function onRequest(context) {
       const gate = await roomGate(db, user, roomId, 'viewer');
       if (gate.response) return gate.response;
 
-      const [settingsRes, membersRes, periodsRes, expensesRes, sharesRes] = await Promise.all([
-        db.prepare('SELECT key, value FROM settings WHERE room_id = ?').bind(roomId).all(),
+      // batch = một round trip D1 cho cả 5 lượt đọc, thay vì 5 query song song.
+      const [settingsRes, membersRes, periodsRes, expensesRes, sharesRes] = await db.batch([
+        db.prepare('SELECT key, value FROM settings WHERE room_id = ?').bind(roomId),
         db.prepare(`
           SELECT m.id, m.name, m.nickname, m.phone, m.is_active, m.created_at,
                  ms.role AS role, ms.user_id AS user_id
@@ -830,11 +849,11 @@ export async function onRequest(context) {
             LEFT JOIN memberships ms ON ms.room_id = m.room_id AND ms.member_id = m.id
            WHERE m.room_id = ?
            ORDER BY m.created_at ASC, m.rowid ASC
-        `).bind(roomId).all(),
-        db.prepare('SELECT * FROM periods WHERE room_id = ? ORDER BY id DESC').bind(roomId).all(),
+        `).bind(roomId),
+        db.prepare('SELECT * FROM periods WHERE room_id = ? ORDER BY id DESC').bind(roomId),
         db.prepare('SELECT * FROM expenses WHERE room_id = ? ORDER BY expense_date DESC, created_at DESC')
-          .bind(roomId).all(),
-        db.prepare('SELECT * FROM member_shares WHERE room_id = ?').bind(roomId).all(),
+          .bind(roomId),
+        db.prepare('SELECT * FROM member_shares WHERE room_id = ?').bind(roomId),
       ]);
 
       const settings = {};

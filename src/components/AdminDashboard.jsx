@@ -37,7 +37,7 @@ import {
 } from '../services/api';
 import { INVITE_ROLES, ROLE_BADGE, ROLE_LABEL, roleRank } from '../constants/roles';
 
-export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDataRefresh }) {
+export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDataRefresh, onAuthRefresh }) {
   const [activeTab, setActiveTab] = useState('members');
   const [copiedLink, setCopiedLink] = useState(false);
 
@@ -165,7 +165,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
       alert(result.error || 'Không giao phòng được.');
       return;
     }
-    onDataRefresh();
+    await onAuthRefresh();
   };
 
   const handleCreateInvite = async (member, role = inviteRole) => {
