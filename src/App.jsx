@@ -24,6 +24,11 @@ import {
   roomIdFromUrl,
   joinWithToken,
   calculatePeriodDebts,
+  removeRoomFromDevice,
+  leaveRoom,
+  fetchMe,
+  getStoredMember,
+  normalizeRoom,
 } from './services/api';
 import { Loader2 } from 'lucide-react';
 
@@ -52,6 +57,11 @@ export default function App() {
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState(false);
   const [roomGateOpen, setRoomGateOpen] = useState(false);
+  // Danh sách phòng đọc từ localStorage, không phải state -> cần số này để đọc lại
+  // sau khi "gỡ khỏi máy này" một phòng KHÔNG phải phòng đang mở.
+  const [roomsTick, setRoomsTick] = useState(0);
+  // Lời dẫn trên RoomGate sau khi gỡ/rời phòng - để màn hình không nói dối.
+  const [gateNotice, setGateNotice] = useState('');
 
   // Link mời đến qua ?j=<token>: đổi lấy phiên rồi xóa token khỏi address bar
   // và lịch sử, để không ai nhìn thấy lại nó.
@@ -111,6 +121,7 @@ export default function App() {
 
   const switchRoom = (nextRoom) => {
     if (!nextRoom || nextRoom === roomId) return;
+    setGateNotice('');
     const url = new URL(window.location.href);
     url.searchParams.set('p', nextRoom);
     window.history.pushState({}, '', url.toString());
@@ -147,7 +158,83 @@ export default function App() {
     const known = listStoredRooms();
     if (!known.some((r) => r.roomId === roomId)) known.unshift({ roomId, member_id: null, role: null });
     return known;
-  }, [roomId, data?.room_id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, data?.room_id, roomsTick]);
+
+  // Hai hành động tách rời theo đúng hai câu hỏi khác nhau:
+  //   "Gỡ khỏi máy này" = quên thiết bị, phòng vẫn còn và vẫn vào lại được bằng PIN/link.
+  //   "Rời phòng"        = nói server thu mọi phiên -> mất quyền ở mọi thiết bị.
+  const afterRoomRemoved = (target, reason) => {
+    if (target !== roomId) {
+      setRoomsTick((n) => n + 1);
+      return;
+    }
+    const rest = listStoredRooms().filter((r) => r.roomId !== target);
+    setSession(null);
+    setAdminHash('');
+    if (rest.length) {
+      switchRoom(rest[0].roomId);
+      return;
+    }
+    // Nói đúng lý do, đừng báo "phòng không tồn tại" với người vừa tự xóa phòng
+    // khỏi máy của mình - phòng vẫn còn nguyên trên máy chủ.
+    setGateNotice(reason || '');
+    setData({ ...normalizeRoom(null, target), source: 'need_room' });
+  };
+
+  const handleForgetRoom = (target) => {
+    const ok = confirm(
+      `Gỡ "${target}" khỏi máy này?\n\n` +
+        'Xóa PIN đã nhớ, phiên và bản lưu offline của phòng trên trình duyệt đang dùng. ' +
+        'Phòng VẪN CÒN trên máy chủ và ở các thiết bị khác; muốn vào lại thì cần PIN hoặc link mời.'
+    );
+    if (!ok) return;
+    removeRoomFromDevice(target);
+    afterRoomRemoved(
+      target,
+      `Bạn vừa gỡ "${target}" khỏi máy này. Phòng vẫn còn trên máy chủ - dán lại link mời hoặc nhập PIN để vào.`
+    );
+  };
+
+  const handleLeaveRoom = async (target) => {
+    const stored = getStoredSession(target);
+    const ok = confirm(
+      `Rời "${target}"?\n\n` +
+        'Mất quyền vào phòng ở MỌI thiết bị và không tự quay lại được - cần chủ phòng gửi link mời mới. ' +
+        'Tên và phần tiền của bạn trong các kỳ cũ vẫn nằm trong sổ.'
+    );
+    if (!ok) return;
+    const result = await leaveRoom(target, {
+      adminHash: getStoredAdminHash(target),
+      member_id: stored?.member_id || getStoredMember(target),
+    });
+    if (!result.success) {
+      alert(result.error || 'Không rời phòng được.');
+      return;
+    }
+    afterRoomRemoved(
+      target,
+      `Bạn đã rời "${target}". Tên và phần tiền của bạn vẫn nằm trong sổ các kỳ cũ; muốn vào lại thì cần chủ phòng gửi link mời mới.`
+    );
+  };
+
+  // Phiên có thể đã bị thu hồi từ lần mở trước (chủ phòng đá, hoặc tự rời ở máy khác).
+  // /api/me là chỗ duy nhất biết được, nên hỏi một lần mỗi khi đổi phòng.
+  useEffect(() => {
+    if (!session?.token) return undefined;
+    let cancelled = false;
+    fetchMe(roomId).then((me) => {
+      if (cancelled) return;
+      if (me.needInvite) {
+        setSession(null);
+        alert(me.error || 'Phiên ở phòng này không còn hiệu lực, cần link mời mới.');
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, session?.token]);
 
   // Auto-calculated debts and shares
   const debts = useMemo(() => {
@@ -155,9 +242,11 @@ export default function App() {
       currentPeriodExpenses,
       activeMembers,
       data?.member_shares || [],
-      activePeriod?.id || ''
+      activePeriod?.id || '',
+      // danh sách CẢ người đã rời: giữ đúng split_config của hóa đơn cũ
+      data?.members || []
     );
-  }, [currentPeriodExpenses, activeMembers, data?.member_shares, activePeriod]);
+  }, [currentPeriodExpenses, activeMembers, data?.member_shares, data?.members, activePeriod]);
 
   // Handlers
   // `then` = việc cần làm tiếp sau khi nhập PIN xong, để không bắt người dùng bấm lại từ đầu.
@@ -268,7 +357,11 @@ export default function App() {
 
   // Cài đặt là của admin: chưa có hash của ĐÚNG phòng thì hỏi PIN đã.
   const handleOpenSettings = () => {
-    if (!requireAdminHash('settings')) return;
+    // Link "Quản lý mời" không có PIN nhưng server cho nó tạo/thu hồi link. Dashboard
+    // sẽ tự thu lại còn đúng tab thành viên khi biết người mở là manager (managerOnly).
+    if (adminHash || session?.role !== 'manager') {
+      if (!requireAdminHash('settings')) return;
+    }
     setIsAdminDashboardOpen(true);
   };
 
@@ -289,7 +382,7 @@ export default function App() {
   // Phòng ở ?p= không tồn tại trên server: dừng lại ở màn tạo / vào phòng,
   // không vẽ một sổ trống toorg rồi để người dùng tưởng mất dữ liệu.
   if (data?.source === 'need_room') {
-    return <RoomGate missingRoomId={roomId} onEnter={enterRoom} />;
+    return <RoomGate missingRoomId={roomId} notice={gateNotice} onEnter={enterRoom} />;
   }
 
   return (
@@ -302,6 +395,8 @@ export default function App() {
         currentRoomId={roomId}
         memberName={session?.member_name}
         onSwitchRoom={switchRoom}
+        onForgetRoom={handleForgetRoom}
+        onLeaveRoom={handleLeaveRoom}
         onOpenCreateRoom={() => setRoomGateOpen(true)}
         onOpenAddExpense={() => {
           setEditingExpense(null);
@@ -417,6 +512,7 @@ export default function App() {
         onClose={() => setIsAdminDashboardOpen(false)}
         data={data}
         adminHash={adminHash}
+        session={session}
         onDataRefresh={loadData}
       />
 

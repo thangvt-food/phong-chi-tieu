@@ -8,6 +8,8 @@ export default function Header({
   currentRoomId,
   memberName,
   onSwitchRoom,
+  onForgetRoom,
+  onLeaveRoom,
   onOpenCreateRoom,
   onOpenAddExpense,
   onOpenSettings,
@@ -61,27 +63,72 @@ export default function Header({
                 <p className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
                   Phòng của bạn
                 </p>
-                {rooms.map((r) => (
-                  <button
-                    key={r.roomId}
-                    onClick={() => {
-                      setMenuOpen(false);
-                      if (r.roomId !== currentRoomId) onSwitchRoom(r.roomId);
-                    }}
-                    className={`w-full text-left px-2.5 py-2 rounded-xl text-xs font-semibold transition-colors ${
-                      r.roomId === currentRoomId
-                        ? 'bg-indigo-50 text-indigo-700'
-                        : 'text-slate-700 hover:bg-slate-100'
-                    }`}
-                  >
-                    {r.roomId}
-                    {r.member_name && (
-                      <span className="block text-[10px] font-normal text-slate-500">
-                        {r.member_name}
-                      </span>
-                    )}
-                  </button>
-                ))}
+                {rooms.map((r) => {
+                  // listStoredRooms chỉ liệt kê phòng thiết bị này đã có dấu vết
+                  // (phiên hoặc hash PIN). Phòng hiện ra vì đang mở ở ?p= mà chưa có
+                  // dấu vết thì không có gì để gỡ/rời - ẩn hai dòng đó đi.
+                  const known = r.member_id != null || r.role != null;
+                  return (
+                    <div key={r.roomId} className="py-0.5">
+                      <button
+                        onClick={() => {
+                          setMenuOpen(false);
+                          if (r.roomId !== currentRoomId) onSwitchRoom(r.roomId);
+                        }}
+                        className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-colors ${
+                          r.roomId === currentRoomId
+                            ? 'bg-indigo-50 text-indigo-700'
+                            : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        {r.roomId}
+                        {r.member_name && (
+                          <span className="block text-[10px] font-normal text-slate-500">
+                            {r.member_name}
+                            {r.role ? ` · ${r.role}` : ''}
+                          </span>
+                        )}
+                      </button>
+                      {known && (
+                        <div className="flex items-center gap-2 px-2.5 pt-0.5">
+                          <button
+                            onClick={() => {
+                              setMenuOpen(false);
+                              onForgetRoom(r.roomId);
+                            }}
+                            className="text-[10px] text-slate-400 hover:text-slate-700 font-semibold"
+                            title="Xóa PIN, phiên và bản offline của phòng này trên máy đang dùng. Phòng vẫn còn trên server."
+                          >
+                            Gỡ khỏi máy này
+                          </button>
+                          {r.member_id != null ? (
+                            <button
+                              onClick={() => {
+                                setMenuOpen(false);
+                                onLeaveRoom(r.roomId);
+                              }}
+                              className="text-[10px] text-rose-400 hover:text-rose-600 font-semibold"
+                              title="Mất quyền vào phòng ở MỌI thiết bị. Tên vẫn còn trong sổ các kỳ cũ."
+                            >
+                              Rời phòng
+                            </button>
+                          ) : (
+                            // Chỉ có hash PIN mà không có phiên = máy này chưa từng bảo
+                            // server "tôi là thành viên nào". leave cần biết đúng người, nên
+                            // đừng hứa một nút mà server sẽ từ chối - đường của thiết bị này
+                            // là Cài đặt -> thành viên -> "Ngưng hoạt động" chính mình.
+                            <span
+                              className="text-[10px] text-slate-400"
+                              title="Máy này vào phòng bằng PIN chứ không bằng link mời nên không biết bạn là thành viên nào. Mở Cài đặt -> thành viên -> Ngưng hoạt động ở dòng tên của bạn."
+                            >
+                              Rời phòng trong Cài đặt
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
                 <button
                   onClick={() => {
                     setMenuOpen(false);

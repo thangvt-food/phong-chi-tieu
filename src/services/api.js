@@ -17,6 +17,10 @@ export function roomIdFromUrl(search = (typeof window !== 'undefined' ? window.l
 const dataKey = (roomId) => `pct:data:${roomId}`;
 const hashKey = (roomId) => `pct:hash:${roomId}`;
 const sessionKey = (roomId) => `pct:session:${roomId}`;
+// Máy tạo phòng vào bằng PIN, không có phiên nên server không biết "tôi là ai".
+// /api/rooms/leave cần đúng người, vì thế member_id do chính create-room trả về
+// phải được nhớ lại - đây là dấu vết duy nhất, không phải credential.
+const memberKey = (roomId) => `pct:member:${roomId}`;
 
 const INITIAL_DATA = {
   settings: {
@@ -79,6 +83,7 @@ export function normalizeRoom(blob, roomId = DEFAULT_ROOM) {
   return {
     room_id: src.room_id || roomId,
     room_name: src.room_name || (src.settings && src.settings.room_name) || roomId,
+    owner_member_id: src.owner_member_id || null,
     settings: { ...(src.settings || {}) },
     members,
     periods: Array.isArray(src.periods) ? src.periods : [],
@@ -142,6 +147,38 @@ export function setStoredSession(roomId, session) {
   localStorage.setItem(sessionKey(roomId), JSON.stringify(session));
 }
 
+export function getStoredMember(roomId) {
+  return localStorage.getItem(memberKey(roomId)) || null;
+}
+
+export function setStoredMember(roomId, memberId) {
+  if (!memberId) localStorage.removeItem(memberKey(roomId));
+  else localStorage.setItem(memberKey(roomId), memberId);
+}
+
+// Vở trống - dùng khi "gỡ khỏi máy này". KHÁC initialDataFor(): hàm đó seed 4 người
+// mẫu + kỳ 2026-10 cho phòng kế thừa, ghi vào là phòng hiện ra với tên người lạ.
+function emptyLedger() {
+  return { settings: {}, members: [], periods: [], expenses: [], member_shares: [] };
+}
+
+// "Gỡ khỏi máy này": quên PIN + phiên + bản offline của một phòng, KHÔNG nói với
+// server. Quyền vào phòng thật vẫn còn ở thiết bị khác và với ai biết mã phòng
+// (GET /api/data không cần PIN - đó là thiết kế đã chốt, xem README).
+// Muốn mất quyền thật thì dùng leaveRoom().
+export function removeRoomFromDevice(roomId) {
+  localStorage.removeItem(hashKey(roomId));
+  localStorage.removeItem(sessionKey(roomId));
+  localStorage.removeItem(memberKey(roomId));
+  localStorage.setItem(dataKey(roomId), JSON.stringify(emptyLedger()));
+  // Phòng kế thừa còn hai khóa không có tiền tố pct:: - listStoredRooms đọc
+  // LEGACY_HASH_KEY nên quên không xóa là phòng tự nhảy lại vào menu.
+  if (roomId === DEFAULT_ROOM) {
+    localStorage.removeItem(LEGACY_HASH_KEY);
+    localStorage.removeItem(LEGACY_DATA_KEY);
+  }
+}
+
 // Những phòng thiết bị này đã từng vào (để Header liệt kê, không gọi server).
 // Hai dấu vết hợp lệ: một phiên member (qua link mời) hoặc một hash PIN admin
 // (phòng tự tạo / đã mở Cài đặt). Thiếu hash cũng tính là "phòng của tôi" —
@@ -165,7 +202,12 @@ export function listStoredRooms() {
     } else if (key.startsWith('pct:hash:')) {
       const roomId = key.slice('pct:hash:'.length);
       if (localStorage.getItem(key) && !byRoom.has(roomId)) {
-        byRoom.set(roomId, { roomId, member_id: null, member_name: '', role: 'admin' });
+        byRoom.set(roomId, {
+          roomId,
+          member_id: getStoredMember(roomId),
+          member_name: '',
+          role: 'admin',
+        });
       }
     }
   }
@@ -238,6 +280,7 @@ export async function createRoom({ name, pin, ownerName }) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) return { success: false, error: data.error || 'Không tạo được phòng' };
     setStoredAdminHash(data.room_id, pin_hash);
+    setStoredMember(data.room_id, data.member_id || null);
     return { success: true, room_id: data.room_id, name: data.name };
   } catch (e) {
     return { success: false, error: 'Không gọi được máy chủ (offline?).' };
@@ -294,17 +337,70 @@ export async function memberTogglePaid(roomId, { period_id, is_paid, paid_amount
   return { success: true, member_id: session.member_id };
 }
 
-export async function createInvite(roomId, memberId, { ttlMin = 15, uses = 1 } = {}, adminHash) {
-  const { res, data } = await postJson('/api/admin/invites', { member_id: memberId, ttl_min: ttlMin, uses }, { roomId, adminHash });
+// role: 'viewer' | 'member' | 'manager' - quyền đi từ link, người mở link không tự chọn được.
+// session thay cho adminHash khi người gọi là manager của phòng (không cầm PIN).
+export async function createInvite(roomId, memberId, { ttlMin = 15, uses = 1, role = 'member' } = {}, adminHash, session) {
+  const { res, data } = await postJson(
+    '/api/admin/invites',
+    { member_id: memberId, ttl_min: ttlMin, uses, role },
+    { roomId, adminHash, session }
+  );
   if (res.status === 401) return { success: false, unauthorized: true };
   if (!res.ok) return { success: false, error: data.error || 'Không tạo được link mời' };
-  return { success: true, token: data.token, expires_at: data.expires_at, room_id: data.room_id };
+  return { success: true, token: data.token, role: data.role, expires_at: data.expires_at, room_id: data.room_id };
 }
 
-export async function revokeMemberSession(roomId, memberId, adminHash) {
-  const { res, data } = await postJson('/api/admin/revoke', { member_id: memberId }, { roomId, adminHash });
+export async function revokeMemberSession(roomId, memberId, adminHash, session) {
+  const { res, data } = await postJson('/api/admin/revoke', { member_id: memberId }, { roomId, adminHash, session });
+  if (res.status === 401) return { success: false, unauthorized: true };
   if (!res.ok) return { success: false, error: data.error || 'Không thu hồi được phiên' };
   return { success: true, revoked: data.revoked };
+}
+
+// Rời phòng THẬT (server): nhân vật ở lại trong sổ với is_active=0, phần tiền đã ghi
+// không đổi, nhưng mọi phiên và mọi link mời của họ bị thu ở mọi thiết bị.
+// Có session thì server lấy member_id từ session; không có thì phải dùng PIN + member_id.
+export async function leaveRoom(roomId, { adminHash, member_id } = {}) {
+  const session = getStoredSession(roomId);
+  const body = session ? {} : { member_id };
+  const { res, data } = await postJson('/api/rooms/leave', body, {
+    roomId,
+    adminHash,
+    session: session?.token,
+  });
+  if (!res.ok) return { success: false, error: data.error || 'Không rời phòng được' };
+  removeRoomFromDevice(roomId);
+  return { success: true, room_id: data.room_id };
+}
+
+// Giao phòng: bắt buộc trước khi chủ phòng rời đi, nếu không guard "chủ phòng không
+// tự rời" biến thành bẫy - phòng có chủ thì vĩnh viễn không bỏ được.
+export async function transferOwner(roomId, memberId, adminHash) {
+  const { res, data } = await postJson('/api/admin/transfer-owner', { member_id: memberId }, { roomId, adminHash });
+  if (res.status === 401) return { success: false, unauthorized: true };
+  if (!res.ok) return { success: false, error: data.error || 'Không giao phòng được' };
+  return { success: true, owner_member_id: data.owner_member_id };
+}
+
+// Kiểm tra phiên còn sống không + mình là ai trong phòng này. Server là nguồn sự
+// thật: chủ phòng đã đá thì lần mở phòng kế tiếp phải biết ngay, không đợi tới lúc
+// bấm "đã nộp" mới thấy lỗi.
+export async function fetchMe(roomId) {
+  const session = getStoredSession(roomId);
+  if (!session) return { none: true };
+  try {
+    const res = await fetch(`/api/me?${qs(roomId)}`, { headers: { Authorization: `Bearer ${session.token}` } });
+    if (res.status === 401 || res.status === 403) {
+      setStoredSession(roomId, null);
+      const data = await res.json().catch(() => ({}));
+      return { needInvite: true, error: data.error || 'Phiên đã hết hạn hoặc bị thu hồi.' };
+    }
+    if (!res.ok) return { error: 'Không kiểm tra được phiên (máy chủ trả ' + res.status + ').' };
+    const data = await res.json();
+    return { member_id: data.member_id, role: data.role, member: data.member };
+  } catch (e) {
+    return { offline: true };
+  }
 }
 
 // Update Room Settings
@@ -356,24 +452,31 @@ export async function saveMember(roomId, member, adminHash) {
   return true;
 }
 
-// Delete Member
+// Ngưng hoạt động một thành viên (server đổi tên hành vi: không còn xóa dòng).
+// Trả về object thay vì `true` để caller hiển thị được các lỗi 409 mới:
+// "chủ phòng không rời được khi chưa giao phòng", "phòng cần còn một người".
+// Chỉ ghi local khi KHÔNG nối được máy chủ; 4xx là câu trả lời thật, phải báo lại
+// chứ không được âm thầm xóa trong bộ nhớ rồi nói "xong".
 export async function deleteMember(roomId, memberId, adminHash) {
+  let res = null;
   try {
-    const res = await fetch(`/api/admin/members/${memberId}?${qs(roomId)}`, {
+    res = await fetch(`/api/admin/members/${memberId}?${qs(roomId)}`, {
       method: 'DELETE',
       headers: { 'x-admin-hash': adminHash },
     });
-    if (res.ok) return true;
-  } catch (e) {}
+  } catch (e) {
+    res = null;
+  }
+  if (res && !res.ok) {
+    const data = await res.json().catch(() => ({}));
+    return { success: false, status: res.status, error: data.error || 'Không ngưng hoạt động được.' };
+  }
 
   const current = getLocalData(roomId);
-  current.members = current.members.filter((m) => m.id !== memberId);
-  current.member_shares = current.member_shares.filter((s) => s.member_id !== memberId);
-  current.expenses = current.expenses.map((e) =>
-    e.target_member_id === memberId ? { ...e, target_member_id: null } : e
-  );
+  current.members = (current.members || []).map((m) => (m.id === memberId ? { ...m, is_active: 0 } : m));
+  // member_shares và expenses.split_config giữ nguyên: đó là hóa đơn đã xảy ra.
   saveLocalData(roomId, current);
-  return true;
+  return { success: true, deactivated: true };
 }
 
 // Save or Update Period
@@ -402,22 +505,30 @@ export async function savePeriod(roomId, period, adminHash) {
   return true;
 }
 
-// Delete Period
+// Xóa một kỳ kèm mọi khoản và mọi phần của nó. Trả về object để caller báo được lỗi
+// thật: trước đây mọi 4xx rơi xuống nhánh local và hàm always `true`, nên nút
+// "Xóa kỳ" trông như thành công nhưng reload thì kỳ vẫn còn.
 export async function deletePeriod(roomId, periodId, adminHash) {
+  let res = null;
   try {
-    const res = await fetch(`/api/admin/periods/${periodId}?${qs(roomId)}`, {
+    res = await fetch(`/api/admin/periods/${periodId}?${qs(roomId)}`, {
       method: 'DELETE',
       headers: { 'x-admin-hash': adminHash },
     });
-    if (res.ok) return true;
-  } catch (e) {}
+  } catch (e) {
+    res = null;
+  }
+  if (res && !res.ok) {
+    const data = await res.json().catch(() => ({}));
+    return { success: false, status: res.status, error: data.error || `Không xóa được kỳ (HTTP ${res.status}).` };
+  }
 
   const current = getLocalData(roomId);
   current.periods = current.periods.filter((p) => p.id !== periodId);
   current.expenses = current.expenses.filter((e) => e.period_id !== periodId);
   current.member_shares = current.member_shares.filter((s) => s.period_id !== periodId);
   saveLocalData(roomId, current);
-  return true;
+  return { success: true };
 }
 
 // Save or Update Expense
@@ -573,11 +684,15 @@ export function parseSplitConfig(exp) {
 }
 
 // Tính số tiền mỗi member phải chịu cho 1 khoản chi (raw float, cộng dồn rồi round ở cuối)
-export function calcExpenseShares(exp, activeMembers = []) {
+// allMembers: danh sách CẢ người đã rời. split_config lưu id chứ không lưu "ai đang ở
+// phòng", nên một khoản đã ghi cho A+B vẫn phải là A+B sau khi B rời - nếu lọc theo
+// người active rồi chia lại, xóa một người sẽ làm hóa đơn của những người còn lại đổi số.
+export function calcExpenseShares(exp, activeMembers = [], allMembers = null) {
   const result = {};
   activeMembers.forEach((m) => {
     result[m.id] = 0;
   });
+  const add = (id, v) => { result[id] = (result[id] || 0) + v; };
   const amount = parseInt(exp?.amount) || 0;
   if (amount <= 0 || activeMembers.length === 0) return result;
 
@@ -585,42 +700,36 @@ export function calcExpenseShares(exp, activeMembers = []) {
   if (exp?.target_member_id) return result;
 
   const cfg = parseSplitConfig(exp);
-  const activeIds = new Set(activeMembers.map((m) => m.id));
+  const knownIds = new Set((allMembers && allMembers.length ? allMembers : activeMembers).map((m) => m.id));
+  activeMembers.forEach((m) => knownIds.add(m.id));
 
   if (cfg.mode === 'custom') {
-    const ids = (cfg.member_ids || []).filter((id) => activeIds.has(id));
+    const ids = (cfg.member_ids || []).filter((id) => knownIds.has(id));
+    // Chỉ config thật sự trống (toàn id lạ) mới quay về chia đều cho người đang ở.
     const parts = ids.length > 0 ? ids : activeMembers.map((m) => m.id);
     const each = amount / parts.length;
-    parts.forEach((id) => {
-      result[id] += each;
-    });
+    parts.forEach((id) => add(id, each));
     return result;
   }
 
   if (cfg.mode === 'fixed') {
-    const fixedValid = (cfg.fixed || []).filter((f) => activeIds.has(f.member_id));
+    const fixedValid = (cfg.fixed || []).filter((f) => knownIds.has(f.member_id));
     const fixedTotal = fixedValid.reduce((s, f) => s + f.amount, 0);
     if (fixedTotal > amount && fixedTotal > 0) {
       // Cố định vượt quá tổng bill -> scale down theo tỉ lệ để không bị âm
       const scale = amount / fixedTotal;
-      fixedValid.forEach((f) => {
-        result[f.member_id] += f.amount * scale;
-      });
+      fixedValid.forEach((f) => add(f.member_id, f.amount * scale));
       return result;
     }
-    fixedValid.forEach((f) => {
-      result[f.member_id] += f.amount;
-    });
+    fixedValid.forEach((f) => add(f.member_id, f.amount));
     const remainder = amount - fixedTotal;
-    let splitIds = (cfg.member_ids || []).filter((id) => activeIds.has(id));
+    let splitIds = (cfg.member_ids || []).filter((id) => knownIds.has(id));
     if (splitIds.length === 0 && remainder > 0) {
       splitIds = activeMembers.map((m) => m.id);
     }
     if (splitIds.length > 0 && remainder > 0) {
       const each = remainder / splitIds.length;
-      splitIds.forEach((id) => {
-        result[id] += each;
-      });
+      splitIds.forEach((id) => add(id, each));
     }
     return result;
   }
@@ -674,7 +783,7 @@ export function formatCompact(amount) {
 }
 
 // Automatic calculation helper for room & personal expenses
-export function calculatePeriodDebts(periodExpenses = [], activeMembers = [], memberShares = [], periodId = '') {
+export function calculatePeriodDebts(periodExpenses = [], activeMembers = [], memberShares = [], periodId = '', allMembers = null) {
   // 1. Separate shared expenses from individual/personal expenses
   const sharedExpenses = [];
   const personalExpensesByMember = {};
@@ -683,18 +792,22 @@ export function calculatePeriodDebts(periodExpenses = [], activeMembers = [], me
     personalExpensesByMember[m.id] = [];
   });
 
+  const known = allMembers && allMembers.length ? allMembers : activeMembers;
+  const knownIds = new Set(known.map((m) => m.id));
+
   periodExpenses.forEach((exp) => {
-    const amount = parseInt(exp.amount) || 0;
-    if (exp.target_member_id && personalExpensesByMember[exp.target_member_id]) {
-      personalExpensesByMember[exp.target_member_id].push(exp);
-    } else {
+    const target = exp.target_member_id;
+    // Khoản gán cho người ĐÃ RỜI vẫn là khoản riêng của họ: để nó lọt vào
+    // sharedExpenses thì phần tiền đó bị chia lại cho những người còn đang ở.
+    if (!target || !knownIds.has(target)) {
       sharedExpenses.push(exp);
+      return;
     }
+    if (!personalExpensesByMember[target]) personalExpensesByMember[target] = [];
+    personalExpensesByMember[target].push(exp);
   });
 
   const totalSharedAmount = sharedExpenses.reduce((sum, e) => sum + (parseInt(e.amount) || 0), 0);
-  // Bình quân để hiển thị overview (mỗi người thực tế có thể khác nhau do chia custom)
-  const sharedPerMember = activeMembers.length > 0 ? Math.round(totalSharedAmount / activeMembers.length) : 0;
 
   // Cộng dồn phần chia chung của từng member theo split_config của từng khoản
   const sharedRawByMember = {};
@@ -704,7 +817,7 @@ export function calculatePeriodDebts(periodExpenses = [], activeMembers = [], me
     sharedItemsByMember[m.id] = [];
   });
   sharedExpenses.forEach((exp) => {
-    const shares = calcExpenseShares(exp, activeMembers);
+    const shares = calcExpenseShares(exp, activeMembers, known);
     activeMembers.forEach((m) => {
       const raw = shares[m.id] || 0;
       if (raw > 0) {
@@ -713,6 +826,18 @@ export function calculatePeriodDebts(periodExpenses = [], activeMembers = [], me
       }
     });
   });
+
+  // Bình quân hiển thị overview. Lấy trung bình phần THỰC TẾ của những người đang ở,
+  // không lấy tổng hóa đơn chia cho số người active: khi có người đã rời, phần của họ
+  // vẫn nằm trong hóa đơn nhưng không ai phải nộp nữa, chia kiểu cũ sẽ ra con số
+  // cao hơn mọi thẻ thành viên trên cùng một màn hình.
+  const sharedPerMember =
+    activeMembers.length > 0
+      ? Math.round(
+          activeMembers.reduce((sum, m) => sum + (sharedRawByMember[m.id] || 0), 0) /
+            activeMembers.length
+        )
+      : 0;
 
   let totalCollected = 0;
   let paidCount = 0;

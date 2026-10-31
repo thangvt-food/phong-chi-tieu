@@ -10,7 +10,7 @@ function extractToken(raw) {
   return s;
 }
 
-export default function RoomGate({ isOpen, onClose, onEnter, missingRoomId }) {
+export default function RoomGate({ isOpen, onClose, onEnter, missingRoomId, notice }) {
   // thiếu onClose + có missingRoomId = màn chặn toàn trang khi ?p= trỏ vào phòng lạ
   const standalone = !isOpen && !!missingRoomId;
   const [tab, setTab] = useState(missingRoomId ? 'join' : 'create');
@@ -93,8 +93,12 @@ export default function RoomGate({ isOpen, onClose, onEnter, missingRoomId }) {
           <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>
-              Phòng <span className="font-mono">{missingRoomId}</span> không tồn tại. Có thể link mời
-              đã hết hạn hoặc mã phòng không đúng.
+              {notice || (
+                <>
+                  Phòng <span className="font-mono">{missingRoomId}</span> không tồn tại. Có thể link mời
+                  đã hết hạn hoặc mã phòng không đúng.
+                </>
+              )}
             </span>
           </div>
         </div>
