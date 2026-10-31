@@ -83,7 +83,7 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    | `npm run db:schema:local` | Dựng lại D1 local từ `schema.sql` (bản đã có `room_id`) |
    | `npm run db:migrate:local` | Chạy `migrations/002_multitenancy.sql` trên D1 local |
    | `bash scripts/smoke.sh` | 48 assertion đa phòng qua HTTP, chạy trên D1 local (cần `dev:server`) |
-   | `bash scripts/pr6-deploy.sh` | Di cư production (backup → migrate → deploy → verify). Không có `--yes` thì chỉ in lệnh |
+   | `bash scripts/pr6-deploy.sh` | Migration D1 lên production (backup → migrate → deploy → verify). Không có `--yes` thì chỉ in lệnh. Mặc định chạy `migrations/003_invite_roles.sql` → version 3; đổi bằng `MIGRATION=… TO_VERSION=…` |
 
 ---
 

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Chạy di cư production cho nhiều phòng (PR6).
+# Chạy một bước migration D1 trên production + deploy, theo đúng thứ tự đã đo:
+# backup -> migrate -> verify từng dòng -> deploy -> verify live.
 #
 #   bash scripts/pr6-deploy.sh              # in ra lệnh sẽ chạy, không đụng prod
-#   bash scripts/pr6-deploy.sh --yes        # chạy thật
-#   bash scripts/pr6-deploy.sh --rotate-pin # riêng bước đổi PIN
-#   bash scripts/pr6-deploy.sh --rollback .wrangler/pre-mt-2026-10-31.sql --yes
+#   bash scripts/pr6-deploy.sh --yes        # chạy thật migration hiện tại (mặc định 003)
+#   bash scripts/pr6-deploy.sh --rotate-pin --yes   # riêng bước đổi PIN
+#   bash scripts/pr6-deploy.sh --rollback .wrangler/pre-003-prod-<ngày>.sql --yes
+#   MIGRATION=migrations/004_x.sql TO_VERSION=4 bash scripts/pr6-deploy.sh --yes
+#
+# 002_multitenancy.sql đã áp dụng lên production ngày 2026-10-31; bản backup của nó
+# là .wrangler/pre-mt-prod-2026-10-31.sql và vẫn là đường lùi của production.
 #
 # Thứ tự BẮT BUỘC là migrate trước, deploy sau. Đã đo cả hai chiều bằng cách
 # chạy code cũ trên schema mới và ngược lại: code mới + schema cũ làm GET /api/data
@@ -23,7 +28,11 @@ PAGES_BRANCH=${PAGES_BRANCH:-production}
 PROJECT=${PROJECT:-phong-chi-tieu}
 DOMAIN=${DOMAIN:-https://phong-chi-tieu.pages.dev}
 ROOM=phong-2a
-MIGRATION=migrations/002_multitenancy.sql
+# Migration + version đích. 002 đã áp dụng lên production ngày 2026-10-31, nên mặc
+# định là bước TIẾP THEO chứ không phải 002: chạy lại 002 thì guard version chặn lại.
+# Muốn migrate bước khác: MIGRATION=migrations/004_x.sql TO_VERSION=4 bash scripts/pr6-deploy.sh
+MIGRATION=${MIGRATION:-migrations/003_invite_roles.sql}
+TO_VERSION=${TO_VERSION:-3}
 STAMP=$(date +%F)
 SCOPE=--remote          # --local khi diễn tập
 SKIP_DEPLOY=0
@@ -40,14 +49,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# Tên file backup phải mang theo scope: nếu chỉ theo ngày thì một lần diễn tập
-# --local sẽ chiếm chỗ bản backup prod, và lần chạy thật "đã tồn tại, dùng lại"
-# là không còn gì để rollback.
+# Tên file backup phải mang theo scope VÀ migration: nếu chỉ theo ngày thì lần diễn
+# tập --local chiếm chỗ bản prod, và migration 003 ghi đè bản backup của 002 — bản
+# đó vẫn là đường lùi duy nhất của production.
+TAG=$(basename "$MIGRATION" .sql | cut -d_ -f1)
 if [ "$SCOPE" = "--remote" ]; then
-  EXPORT=.wrangler/pre-mt-prod-$STAMP.sql
+  EXPORT=.wrangler/pre-${TAG}-prod-$STAMP.sql
   SCOPE_LABEL="PRODUCTION"
 else
-  EXPORT=.wrangler/pre-mt-local-$STAMP.sql
+  EXPORT=.wrangler/pre-${TAG}-local-$STAMP.sql
   SCOPE_LABEL="local (diễn tập)"
 fi
 
@@ -65,6 +75,20 @@ d1r() { # truy vấn D1 production, trả JSON. Dry-run thì không được ch�
   if [ "$APPLY" != 1 ]; then echo '"(dry-run: không hỏi prod)"'; return 0; fi
   npx wrangler d1 execute "$DB" $SCOPE --json --command "$1" 2>/dev/null \
     | python3 -c 'import json,sys;d=json.load(sys.stdin);print(json.dumps((d[0] if isinstance(d,list) else d).get("results")))'
+}
+
+# Version schema thật của DB đích, đọc từ schema_meta chứ không suy từ "bảng có tồn
+# tại hay không": từ 002 trở đi bảng luôn còn đó, nên phép thử cũ chặn mọi migration
+# sau này. Trả "" khi DB legacy (chưa có schema_meta) hoặc khi đọc lỗi.
+db_version() {
+  d1r "SELECT MAX(version) AS v FROM schema_meta" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = []
+v = rows[0].get("v") if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+print("" if v is None else v)'
 }
 
 if [ "$APPLY" = 0 ]; then
@@ -89,17 +113,26 @@ if [ "$SKIP_DEPLOY" = 0 ] && [ "$DO_ROTATE" = 0 ]; then
 fi
 
 if [ "$APPLY" = 1 ] && [ "$DO_ROTATE" = 0 ]; then
-  # Hỏi thẳng DB đích, không tin vào file backup: nếu schema_meta đã tồn tại thì
-  # hoặc đã migrate rồi, hoặc đây là diễn tập lần hai — chạy tiếp sẽ vô nghĩa và
-  # dễ làm hỏng bản backup đang có.
-  ALREADY=$(d1r "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'")
-  case "$ALREADY" in
-    *schema_meta*)
-      echo "  ! DB $SCOPE_LABEL đã có schema_meta -> đã migrate rồi. Không làm gì thêm." >&2
-      echo "  ! Nếu chỉ muốn đổi PIN: bash scripts/pr6-deploy.sh $([ "$SCOPE" = "--local" ] && echo --local) --rotate-pin" >&2
-      exit 1 ;;
-  esac
-  echo "  DB chưa migrate (không có schema_meta) -> đúng cái cần làm"
+  # So VERSION, không xét "bảng schema_meta có tồn tại không": bảng đó có từ 002 nên
+  # phép thử cũ sẽ chặn mọi migration sau 002, kể cả 003 chạy trên đúng DB này.
+  NOW_V=$(db_version || true)
+  EXPECT_V=$((TO_VERSION - 1))
+  if [ -z "$NOW_V" ]; then
+    # DB legacy, chưa có schema_meta: chỉ hợp lệ khi chính migration này là bước tạo ra nó.
+    [ "$EXPECT_V" = 1 ] || { echo "  ! DB $SCOPE_LABEL không đọc được version (legacy hoặc lỗi)," >&2
+                             echo "  ! mà $MIGRATION đòi hỏi version $EXPECT_V trước đó. Dừng." >&2; exit 1; }
+    echo "  DB legacy (không có schema_meta) -> đúng cái cần migrate lên version $TO_VERSION"
+  elif [ "$NOW_V" -ge "$TO_VERSION" ]; then
+    echo "  ! DB $SCOPE_LABEL đã ở version $NOW_V >= $TO_VERSION -> $MIGRATION chạy rồi. Không làm gì thêm." >&2
+    echo "  ! Nếu chỉ muốn đổi PIN: bash scripts/pr6-deploy.sh $([ "$SCOPE" = "--local" ] && echo --local) --rotate-pin" >&2
+    exit 1
+  elif [ "$NOW_V" != "$EXPECT_V" ]; then
+    echo "  ! DB $SCOPE_LABEL đang ở version $NOW_V, $MIGRATION đòi hỏi đúng version $EXPECT_V." >&2
+    echo "  ! Sai bước liền trước -> dừng, đừng chạy tắt." >&2
+    exit 1
+  else
+    echo "  DB đang ở version $NOW_V -> đúng bước liền trước của $MIGRATION (lên version $TO_VERSION)"
+  fi
 fi
 
 # ------------------------------------------------- (đi tắt) chỉ đổi PIN rồi dừng
@@ -107,11 +140,11 @@ if [ "$DO_ROTATE" = 1 ]; then
   say "Đổi PIN admin cho $ROOM ($SCOPE_LABEL)"
   echo "  Prod đang để PIN 123456 — ai biết URL là ghi được vào sổ. Bước này bắt buộc."
   if [ "$APPLY" = 1 ]; then
-    case "$(d1r "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'")" in
-      *schema_meta*) : ;;
-      *) echo "  ! DB chưa migrate: settings còn là bảng khóa đơn, chưa có cột room_id." >&2
-         echo "  ! Chạy migrate trước: bash scripts/pr6-deploy.sh --yes" >&2; exit 1 ;;
-    esac
+    NOW_V=$(db_version || true)
+    [ -n "$NOW_V" ] && [ "$NOW_V" -ge 2 ] || {
+      echo "  ! DB chưa migrate (version '${NOW_V:-legacy}'): settings còn là bảng khóa đơn, chưa có cột room_id." >&2
+      echo "  ! Chạy migrate trước: bash scripts/pr6-deploy.sh --yes" >&2; exit 1; }
+    echo "  DB ở version $NOW_V, settings đã per-room -> đổi PIN được"
     echo "  hash hiện tại: $(d1r "SELECT substr(value,1,10)||'…' h FROM settings WHERE room_id='$ROOM' AND key='admin_pin_hash'")"
   fi
   printf '  PIN mới (4+ ký tự, sẽ không hiện lại): '
@@ -146,11 +179,29 @@ else
 fi
 
 if [ "$APPLY" = 1 ] && [ -f "$EXPORT" ]; then
-  if grep -q "room_id" "$EXPORT"; then
-    echo "  ! Bản export đã có room_id -> không phải schema legacy. Dừng, kiểm tra lại." >&2
+  # Bản backup phải thật là trạng thái TRƯỚC migration này. Xét "có room_id hay không"
+  # chỉ đúng cho 002 — prod giờ luôn có room_id nên phép đó chặn mọi lần chạy sau.
+  # Version ghi ngay trong file backup là thứ tổng quát và không cần hỏi DB.
+  [ "$(grep -c "CREATE TABLE" "$EXPORT")" -gt 0 ] || { echo "  ! Bản backup không có bảng nào — export hỏng? Dừng." >&2; exit 1; }
+  # Định dạng thật của `wrangler d1 export` là một dòng INSERT không kèm danh sách cột,
+  # ví trị version nằm ngay sau VALUES(. Grep mọi con số rồi lấy số lớn nhất sẽ trả về
+  # 2026 (năm trong cột applied_at) — đã dính khi diễn tập.
+  BK_V=$(python3 -c '
+import re, sys
+txt = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+vs = re.findall(r"INSERT INTO\s+.?schema_meta.?\s*(?:\([^)]*\))?\s*VALUES\s*\(\s*(\d+)", txt, re.I)
+print(max(vs, key=int) if vs else "")' "$EXPORT")
+  if [ -z "$BK_V" ]; then
+    [ "${EXPECT_V:-1}" = 1 ] || { echo "  ! Bản backup là legacy (không có schema_meta) trong khi $MIGRATION đòi version trước = ${EXPECT_V:-?}." >&2; exit 1; }
+    echo "  backup là schema legacy -> đúng cái cần migrate"
+  elif [ "$BK_V" -ge "$TO_VERSION" ]; then
+    echo "  ! Bản backup đã ở version $BK_V >= $TO_VERSION -> DB đã migrate rồi, export này không phải bản trước migration." >&2
+    exit 1
+  elif [ "$BK_V" != "$EXPECT_V" ]; then
+    echo "  ! Backup ở version $BK_V, mong đợi đúng version $EXPECT_V ngay trước $MIGRATION." >&2
     exit 1
   fi
-  echo "  export là schema legacy (không có room_id) -> đúng cái cần migrate"
+  [ -n "$BK_V" ] && echo "  backup ở version $BK_V -> đúng trạng thái trước $MIGRATION"
 fi
 
 # ---------------------------------------------------------------- 2. baseline
@@ -167,7 +218,17 @@ run "npx wrangler d1 execute $DB $SCOPE --file=$MIGRATION"
 
 if [ "$APPLY" = 1 ]; then
   say "4. Kiểm tra sau migrate: version + số dòng + từng dòng một"
-  echo "  schema_meta: $(d1r 'SELECT version FROM schema_meta')"
+  AFTER_V=$(db_version || true)
+  echo "  schema_meta: version=${AFTER_V:-?} (mong đợi $TO_VERSION)"
+  if [ "${AFTER_V:-0}" != "$TO_VERSION" ]; then
+    # route.js chỉ放行 đường ghi khi DB đúng version nó đòi (SCHEMA_VERSION). Migration
+    # quên stamp version -> DB thấp hơn -> mọi POST/DELETE trên prod trả 503, mà app vẫn
+    # đọc bình thường nên không ai thấy gì cho tới lúc có người bấm "Lưu".
+    echo "  ! SAU MIGRATION DB ở version '${AFTER_V:-legacy}', phải là $TO_VERSION." >&2
+    echo "  ! File $MIGRATION thiếu câu INSERT INTO schema_meta, hoặc chạy hỏng giữa chừng." >&2
+    echo "  ! CHƯA deploy. Rollback: bash scripts/pr6-deploy.sh --rollback $EXPORT --yes" >&2
+    exit 1
+  fi
   AFTER=$(d1r "$COUNTS")
   AFTER_F=$(d1r "$FINGER")
   echo "  sau : $AFTER"
