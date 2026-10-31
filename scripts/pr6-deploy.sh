@@ -14,6 +14,12 @@ set -euo pipefail
 
 # Cho phép diễn tập toàn bộ script trên D1 local:  --local --skip-deploy --yes
 DB=${DB:-phong_chi_tieu_db}
+# Production của project này là branch "production" (cài đặt Pages), KHÔNG phải "main".
+# Thiếu cờ này thì `wrangler pages deploy` dùng tên branch hiện tại = main -> chỉ lên
+# PREVIEW, còn phong-chi-tieu.pages.dev vẫn chạy bundle cũ: DB đã migrate mà code prod
+# vẫn cũ => admin/periods, admin/settings, admin/toggle-share-paid trả 500 với người thật.
+# Đã dính đúng như vậy ở lần chạy 2026-10-31.
+PAGES_BRANCH=${PAGES_BRANCH:-production}
 PROJECT=${PROJECT:-phong-chi-tieu}
 DOMAIN=${DOMAIN:-https://phong-chi-tieu.pages.dev}
 ROOM=phong-2a
@@ -193,12 +199,12 @@ fi
 
 # ---------------------------------------------------------------- 5. deploy
 if [ "$SKIP_DEPLOY" = 0 ]; then
-  say "5. Deploy Functions + client lên $PROJECT"
-  run "npx wrangler pages deploy dist --project-name=$PROJECT"
+  say "5. Deploy Functions + client lên $PROJECT (branch $PAGES_BRANCH = Production)"
+  run "npx wrangler pages deploy dist --project-name=$PROJECT --branch=$PAGES_BRANCH"
 
   if [ "$APPLY" = 1 ]; then
     say "6. Kiểm tra bản live"
-    sleep 5
+    sleep 8
     code=$(curl -s -o /tmp/pr6-live.json -w '%{http_code}' "$DOMAIN/api/data?p=$ROOM" || echo 000)
     echo "  GET /api/data?p=$ROOM -> HTTP $code"
     python3 -c '
@@ -209,6 +215,11 @@ except Exception as e:
     raise SystemExit("  ! không đọc được JSON: %s" % e)
 if "error" in d:
     raise SystemExit("  ! LỖI: %s" % d["error"])
+# room_id chỉ tồn tại ở code MỚI. Không có nó nghĩa là phong-chi-tieu.pages.dev vẫn
+# đang serve bundle cũ (deploy rơi vào Preview) — tức là prod chưa được cập nhật.
+if not d.get("room_id"):
+    raise SystemExit("  ! PRODUCTION VẪN CHẠY CODE CŨ (response không có room_id). "
+                     "Kiểm tra: npx wrangler pages deployment list --project-name=phong-chi-tieu")
 print("  members=%d periods=%d expenses=%d shares=%d | transfer_code=%s" % (
     len(d["members"]), len(d["periods"]), len(d["expenses"]),
     len(d["member_shares"]), d["settings"].get("transfer_code")))

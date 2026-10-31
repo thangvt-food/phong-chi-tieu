@@ -119,9 +119,10 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    npm run build
    ```
 
-5. **Deploy lên Cloudflare Pages**:
+5. **Deploy lên Cloudflare Pages** (thiếu `--branch=production` là code chỉ lên Preview,
+   `phong-chi-tieu.pages.dev` vẫn chạy bản cũ):
    ```bash
-   npx wrangler pages deploy dist --project-name=phong-chi-tieu
+   npx wrangler pages deploy dist --project-name=phong-chi-tieu --branch=production
    ```
 
 ---
