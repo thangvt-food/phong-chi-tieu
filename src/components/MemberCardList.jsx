@@ -10,6 +10,7 @@ import {
   X,
   History,
   Loader2,
+  UserPlus,
 } from 'lucide-react';
 import { formatMoney } from '../services/api';
 import confetti from 'canvas-confetti';
@@ -25,6 +26,7 @@ export default function MemberCardList({
   onRecordPayment,
   onSelectMember,
   onOpenLogs,
+  onManageMembers,
   saving = false,
 }) {
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -102,7 +104,7 @@ export default function MemberCardList({
         {onOpenLogs && (
           <button
             onClick={onOpenLogs}
-            className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 text-[11px] font-semibold transition-colors"
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 text-xs font-semibold transition-colors"
             title="Xem nhật ký giao dịch tiền & chi tiêu"
           >
             <History className="w-3.5 h-3.5" />
@@ -112,6 +114,26 @@ export default function MemberCardList({
       </div>
 
       {/* Compact Member Rows */}
+      {memberCalculations.length === 0 ? (
+        <div className="py-8 px-4 text-center space-y-1.5">
+          <div className="w-11 h-11 mx-auto rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+            <Users className="w-5 h-5" />
+          </div>
+          <p className="text-xs font-bold text-slate-600">Chưa có ai phải đóng tiền kỳ này</p>
+          <p className="text-xs text-slate-400">
+            Thêm thành viên hoặc tạo khoản chi đầu tiên để sổ hiện số.
+          </p>
+          {canManageAll && onManageMembers && (
+            <button
+              onClick={onManageMembers}
+              className="mt-3 inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-sm transition-colors"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              Thêm thành viên
+            </button>
+          )}
+        </div>
+      ) : (
       <div className="divide-y divide-slate-100">
         {memberCalculations.map((calc) => {
           const { member, sharedAmount, sharedItems = [], personalTotal, personalItems, totalAmount, paidAmount = 0, remaining = 0, isPartial, isPaid } = calc;
@@ -150,7 +172,7 @@ export default function MemberCardList({
                     )}
                   </div>
 
-                  <div className="text-[11px] font-semibold text-slate-500 truncate flex items-center gap-1.5">
+                  <div className="text-xs font-semibold text-slate-500 truncate flex items-center gap-1.5">
                     <span>
                       Chung: {formatMoney(sharedAmount)}
                       {sharedItems.length > 0 && (
@@ -164,7 +186,7 @@ export default function MemberCardList({
                   {/* Tiến độ trả góp */}
                   {isPartial && (
                     <div className="mt-1 space-y-0.5">
-                      <div className="text-[11px] font-bold text-amber-700">
+                      <div className="text-xs font-bold text-amber-700">
                         Đã trả {formatMoney(paidAmount)} • còn {formatMoney(remaining)}
                       </div>
                       <div className="w-full max-w-[160px] bg-slate-100 h-1 rounded-full overflow-hidden">
@@ -197,7 +219,7 @@ export default function MemberCardList({
                 <button
                   onClick={() => requestToggle(calc)}
                   disabled={saving}
-                  className={`p-1.5 rounded-xl transition-all disabled:opacity-50 ${
+                  className={`p-2 min-h-9 min-w-9 inline-flex items-center justify-center rounded-xl transition-all disabled:opacity-50 ${
                     isPaid
                       ? 'text-emerald-600 bg-emerald-100/70 hover:bg-emerald-200'
                       : isPartial
@@ -225,7 +247,7 @@ export default function MemberCardList({
                 <button
                   onClick={() => onRecordPayment && onRecordPayment(calc)}
                   disabled={saving}
-                  className="p-1.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 transition-all active:scale-95 disabled:opacity-50"
+                  className="p-2 min-h-9 min-w-9 inline-flex items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 transition-all active:scale-95 disabled:opacity-50"
                   title="Ghi nhận thu từng phần"
                 >
                   <HandCoins className="w-4 h-4 stroke-[2.5]" />
@@ -236,7 +258,7 @@ export default function MemberCardList({
                 {/* VietQR Icon Button */}
                 <button
                   onClick={() => onOpenQr(calc)}
-                  className="p-1.5 rounded-xl bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition-all active:scale-95"
+                  className="p-2 min-h-9 min-w-9 inline-flex items-center justify-center rounded-xl bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition-all active:scale-95"
                   title="Mở mã VietQR chuyển khoản"
                 >
                   <QrCode className="w-4 h-4 stroke-[2.5]" />
@@ -266,7 +288,7 @@ export default function MemberCardList({
                   <h4 className="font-bold text-sm text-slate-900">
                     {confirmDialog.isCancelPaid ? "Xác nhận hủy thanh toán" : "Xác nhận xóa hết nợ"}
                   </h4>
-                  <p className="text-[11px] text-slate-500">{confirmDialog.memberName}</p>
+                  <p className="text-xs text-slate-500">{confirmDialog.memberName}</p>
                 </div>
               </div>
               <button
@@ -286,7 +308,7 @@ export default function MemberCardList({
                 <p className="text-base font-extrabold text-indigo-600">
                   {formatMoney(confirmDialog.targetAmount)}
                 </p>
-                <p className="text-[10px] text-slate-400">
+                <p className="text-[11px] text-slate-400">
                   Để tránh bấm nhầm làm xóa trắng nợ, hãy nhập chính xác số tiền trên để xác nhận.
                 </p>
               </div>
@@ -311,7 +333,7 @@ export default function MemberCardList({
               </div>
 
               {confirmError && (
-                <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-center gap-1.5">
+                <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-1.5">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                   <span>{confirmError}</span>
                 </div>
@@ -350,6 +372,7 @@ export default function MemberCardList({
         </div>
       )}
       </div>
+      )}
     </div>
   );
 }

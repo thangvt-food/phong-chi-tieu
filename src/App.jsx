@@ -13,6 +13,8 @@ import AdminDashboard from './components/AdminDashboard';
 import ActivityLogModal from './components/ActivityLogModal';
 import AuthGate from './components/AuthGate';
 import AddRoomModal from './components/AddRoomModal';
+import LedgerSkeleton from './components/Skeleton';
+import FeedbackProvider, { useFeedback } from './components/Feedback';
 import {
   fetchRoomData,
   saveExpense,
@@ -33,7 +35,8 @@ import {
 import { roleRank } from './constants/roles';
 import { useBusyGuard } from './hooks/useBusyGuard';
 
-export default function App() {
+function AppShell() {
+  const { toast, askConfirm } = useFeedback();
   const booted = useRef(false);
 
   const [auth, setAuth] = useState(() => getStoredUser());
@@ -124,7 +127,7 @@ export default function App() {
       if (inviteToken) {
         const preview = await previewInvite(inviteToken);
         if (preview.success) pendingInvite = { token: inviteToken, preview };
-        else alert(preview.error || 'Link mời không còn hiệu lực.');
+        else toast.error(preview.error || 'Link mời không còn hiệu lực.');
         const clean = new URL(window.location.href);
         clean.searchParams.delete('j');
         window.history.replaceState({}, '', clean.toString());
@@ -172,7 +175,7 @@ export default function App() {
           }
           if (!claim.pending) target = claim.room_id;
         } else {
-          alert(claim.error || 'Không nhận được link mời.');
+          toast.error(claim.error || 'Không nhận được link mời.');
         }
       }
 
@@ -333,21 +336,28 @@ export default function App() {
   const handleLeaveRoom = async () => {
     if (!me) return;
     if (me.is_owner) {
-      alert(
+      toast.error(
         'Bạn là chủ phòng. Hãy giao phòng cho người khác trong Cài đặt → Thành viên trước khi rời.'
       );
       return;
     }
-    if (!confirm(
-      `Rời "${data?.room_name || roomId}"?\n\n` +
-        'Bạn mất quyền vào phòng này; tên và phần tiền của bạn trong các kỳ cũ vẫn nằm trong sổ. ' +
-        'Muốn vào lại thì cần chủ phòng gửi link mời mới.'
-    )) return;
+    if (
+      !(await askConfirm({
+        title: 'Rời phòng',
+        message:
+          `Rời "${data?.room_name || roomId}"?\n\n` +
+          'Bạn mất quyền vào phòng này; tên và phần tiền của bạn trong các kỳ cũ vẫn nằm trong sổ. ' +
+          'Muốn vào lại thì cần chủ phòng gửi link mời mới.',
+        confirmLabel: 'Rời phòng',
+        danger: true,
+      }))
+    )
+      return;
 
     return runWrite('room:leave', async () => {
       const result = await leaveRoom(roomId);
       if (!result.success) {
-        alert(result.error || 'Không rời phòng được.');
+        toast.error(result.error || 'Không rời phòng được.');
         return result;
       }
       const fresh = await authMe();
@@ -374,11 +384,11 @@ export default function App() {
       const result = await saveExpense(roomId, expense);
       if (!result.success) {
         if (result.unauthorized) {
-          alert('Phiên đã hết hạn, đăng nhập lại.');
+          toast.error('Phiên đã hết hạn, đăng nhập lại.');
           await refreshMe();
           return result;
         }
-        alert(result.error || 'Không thể lưu khoản chi!');
+        toast.error(result.error || 'Không thể lưu khoản chi!');
         return result;
       }
       if (result.period_id) setSelectedPeriodId(result.period_id);
@@ -387,16 +397,24 @@ export default function App() {
     });
 
   const handleDeleteExpense = async (id) => {
-    if (!confirm('Xóa khoản chi này?')) return { success: false, blocked: true };
+    if (
+      !(await askConfirm({
+        title: 'Xóa khoản chi',
+        message: 'Xóa khoản chi này? Toàn bộ phần đã chia của mọi người trong kỳ sẽ mất theo.',
+        confirmLabel: 'Xóa',
+        danger: true,
+      }))
+    )
+      return { success: false, blocked: true };
     return runWrite(`expense:delete:${id}`, async () => {
       const result = await deleteExpense(roomId, id);
       if (!result.success) {
         if (result.unauthorized) {
-          alert('Phiên đã hết hạn, đăng nhập lại.');
+          toast.error('Phiên đã hết hạn, đăng nhập lại.');
           await refreshMe();
           return result;
         }
-        alert(result.error || 'Không xóa được khoản chi.');
+        toast.error(result.error || 'Không xóa được khoản chi.');
         return result;
       }
       await loadRoom(roomId);
@@ -408,7 +426,7 @@ export default function App() {
     if (!me || isOffline) return { success: false, blocked: true };
     const targetPeriod = periodId || activePeriod?.id;
     if (!targetPeriod) {
-      alert('Phòng chưa có kỳ nào. Hãy tạo kỳ hoặc thêm khoản chi trước.');
+      toast.error('Phòng chưa có kỳ nào. Hãy tạo kỳ hoặc thêm khoản chi trước.');
       return { success: false, blocked: true };
     }
     const isSelf = me.member_id === memberId;
@@ -425,11 +443,11 @@ export default function App() {
 
       if (!result.success) {
         if (result.unauthorized) {
-          alert('Phiên đã hết hạn, đăng nhập lại.');
+          toast.error('Phiên đã hết hạn, đăng nhập lại.');
           await refreshMe();
           return result;
         }
-        alert(result.error || 'Không lưu được!');
+        toast.error(result.error || 'Không lưu được!');
         return result;
       }
       await loadRoom(roomId);
@@ -480,12 +498,7 @@ export default function App() {
   // ---- Màn hình ----
 
   if (!authReady || loading) {
-    return (
-      <div className="min-h-screen bg-slate-100 flex flex-col items-center justify-center p-4">
-        <Loader2 className="w-8 h-8 text-indigo-600 animate-spin mb-2" />
-        <p className="text-xs font-bold text-slate-700">Đang tải sổ chi tiêu...</p>
-      </div>
-    );
+    return <LedgerSkeleton />;
   }
 
   if (!auth) {
@@ -534,7 +547,7 @@ export default function App() {
                 {pendingRequests.map((request) => (
                   <p
                     key={request.id}
-                    className={`text-[11px] mt-1 ${request.status === 'rejected' ? 'text-rose-700' : 'text-amber-800'}`}
+                    className={`text-xs mt-1 ${request.status === 'rejected' ? 'text-rose-700' : 'text-amber-800'}`}
                   >
                     {request.room_name} · hồ sơ {request.member_name}
                     {request.status === 'rejected' ? ' · yêu cầu bị từ chối' : ' · đang chờ duyệt'}
@@ -542,7 +555,7 @@ export default function App() {
                 ))}
                 <button
                   onClick={refreshMe}
-                  className="mt-2 text-[11px] font-semibold text-amber-900 underline"
+                  className="mt-2 text-xs font-semibold text-amber-900 underline"
                 >
                   Kiểm tra lại trạng thái
                 </button>
@@ -585,7 +598,7 @@ export default function App() {
               <button
                 onClick={handleLogout}
                 disabled={saving}
-                className="text-[11px] font-semibold text-slate-400 hover:text-slate-600 pt-1 disabled:opacity-50 flex items-center justify-center gap-1.5 mx-auto"
+                className="text-xs font-semibold text-slate-400 hover:text-slate-600 pt-1 disabled:opacity-50 flex items-center justify-center gap-1.5 mx-auto"
               >
                 {isWriteBusy('auth:logout') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Đăng xuất
@@ -718,7 +731,7 @@ export default function App() {
 
       <main className="max-w-xl w-full mx-auto px-3 sm:px-4 py-3 space-y-3 flex-1">
         {isOffline && (
-          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-semibold flex items-center gap-2">
+          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold flex items-center gap-2">
             <WifiOff className="w-3.5 h-3.5 shrink-0" />
             Đang xem bản lưu offline. Ghi sổ và tick đã nộp tạm khóa đến khi có mạng.
           </div>
@@ -752,6 +765,7 @@ export default function App() {
           onRecordPayment={handleRecordPayment}
           onSelectMember={(calc) => setDetailMemberId(calc.member.id)}
           onOpenLogs={() => setIsLogsOpen(true)}
+          onManageMembers={() => setIsAdminDashboardOpen(true)}
         />
 
         <ExpenseList
@@ -842,7 +856,7 @@ export default function App() {
                 </div>
                 <div>
                   <h3 className="font-bold text-sm text-slate-900">Chọn phòng quản lý</h3>
-                  <p className="text-[11px] text-slate-500">Bạn đang tham gia hoặc quản lý nhiều phòng</p>
+                  <p className="text-xs text-slate-500">Bạn đang tham gia hoặc quản lý nhiều phòng</p>
                 </div>
               </div>
               <button
@@ -876,12 +890,12 @@ export default function App() {
                       <div className="flex items-center gap-1.5">
                         <span className="font-bold text-xs text-slate-900 truncate">{r.room_name}</span>
                         {isOwnerOrManager && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-semibold">
+                          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-semibold">
                             {r.role === "owner" ? "Chủ phòng" : "Quản lý"}
                           </span>
                         )}
                       </div>
-                      <span className="text-[11px] text-slate-400 block font-mono">{r.room_id}</span>
+                      <span className="text-xs text-slate-400 block font-mono">{r.room_id}</span>
                     </div>
                     <span className="text-xs font-semibold text-indigo-600 shrink-0">
                       {isSelected ? "Đang mở" : "Chuyển vào"}
@@ -910,5 +924,13 @@ export default function App() {
       />
 
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <FeedbackProvider>
+      <AppShell />
+    </FeedbackProvider>
   );
 }

@@ -39,9 +39,11 @@ import {
   reviewJoinRequest,
 } from '../services/api';
 import { ROLE_BADGE, ROLE_LABEL, roleRank } from '../constants/roles';
+import { useFeedback } from './Feedback';
 import { useBusyGuard } from '../hooks/useBusyGuard';
 
 export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDataRefresh, onAuthRefresh }) {
+  const { toast, askConfirm } = useFeedback();
   const isOwner = me?.role === 'owner';
   const [activeTab, setActiveTab] = useState('members');
   const [copiedLink, setCopiedLink] = useState(false);
@@ -113,7 +115,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
   const handleSaveMember = (e) => {
     e.preventDefault();
     if (!memberForm.name.trim()) {
-      alert('Vui lòng nhập họ và tên!');
+      toast.error('Vui lòng nhập họ và tên!');
       return;
     }
     return runWrite('member:new', async () => {
@@ -123,7 +125,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
         phone: memberForm.phone.trim(),
       });
       if (!result.success) {
-        alert(result.error || 'Không thêm được thành viên.');
+        toast.error(result.error || 'Không thêm được thành viên.');
         return result;
       }
       setMemberForm({ name: '', nickname: '', phone: '' });
@@ -132,16 +134,23 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     });
   };
 
-  const handleDeactivate = (m) => {
-    if (!confirm(
-      `Ngưng hoạt động ${m.name}?\n\n` +
-        'Mất quyền vào phòng ngay lập tức. Tên, phần tiền và các khoản đã chia của người này ' +
-        'vẫn nằm nguyên trong sổ các kỳ cũ.'
-    )) return;
+  const handleDeactivate = async (m) => {
+    if (
+      !(await askConfirm({
+        title: 'Ngưng hoạt động',
+        message:
+          `Ngưng hoạt động ${m.name}?\n\n` +
+          'Mất quyền vào phòng ngay lập tức. Tên, phần tiền và các khoản đã chia của người này ' +
+          'vẫn nằm nguyên trong sổ các kỳ cũ.',
+        confirmLabel: 'Ngưng hoạt động',
+        danger: true,
+      }))
+    )
+      return;
     return runWrite(`member:deactivate:${m.id}`, async () => {
       const result = await deactivateMember(roomId, m.id);
       if (!result.success) {
-        alert(result.error || 'Không ngưng hoạt động được.');
+        toast.error(result.error || 'Không ngưng hoạt động được.');
         return result;
       }
       if (invite?.member_id === m.id) setInvite(null);
@@ -154,20 +163,27 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     runWrite(`member:reactivate:${m.id}`, async () => {
       const result = await reactivateMember(roomId, m.id);
       if (!result.success) {
-        alert(result.error || 'Không thêm lại được.');
+        toast.error(result.error || 'Không thêm lại được.');
         return result;
       }
       await onDataRefresh();
       return result;
     });
 
-  const handleRoleChange = (m, role) => {
+  const handleRoleChange = async (m, role) => {
     if (role === m.role) return;
-    if (!confirm(`Đổi quyền của ${m.name} thành "${ROLE_LABEL[role]}"?`)) return;
+    if (
+      !(await askConfirm({
+        title: 'Đổi quyền',
+        message: `Đổi quyền của ${m.name} thành "${ROLE_LABEL[role]}"?`,
+        confirmLabel: 'Đổi quyền',
+      }))
+    )
+      return;
     return runWrite(`member:role:${m.id}`, async () => {
       const result = await setMemberRole(roomId, m.id, role);
       if (!result.success) {
-        alert(result.error || 'Không đổi được quyền.');
+        toast.error(result.error || 'Không đổi được quyền.');
         return result;
       }
       await onDataRefresh();
@@ -175,16 +191,23 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     });
   };
 
-  const handleUnlink = (m) => {
-    if (!confirm(
-      `Gỡ tài khoản khỏi ${m.name}?\n\n` +
-        'Tài khoản của người đó mất quyền vào phòng này (các phòng khác không đổi). ' +
-        'Muốn vào lại thì bạn gửi một link mời mới. Lịch sử tiền vẫn giữ nguyên.'
-    )) return;
+  const handleUnlink = async (m) => {
+    if (
+      !(await askConfirm({
+        title: 'Gỡ tài khoản',
+        message:
+          `Gỡ tài khoản khỏi ${m.name}?\n\n` +
+          'Tài khoản của người đó mất quyền vào phòng này (các phòng khác không đổi). ' +
+          'Muốn vào lại thì bạn gửi một link mời mới. Lịch sử tiền vẫn giữ nguyên.',
+        confirmLabel: 'Gỡ tài khoản',
+        danger: true,
+      }))
+    )
+      return;
     return runWrite(`member:unlink:${m.id}`, async () => {
       const result = await unlinkMember(roomId, m.id);
       if (!result.success) {
-        alert(result.error || 'Không gỡ được liên kết.');
+        toast.error(result.error || 'Không gỡ được liên kết.');
         return result;
       }
       await onDataRefresh();
@@ -192,15 +215,22 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     });
   };
 
-  const handleTransferOwner = (m) => {
-    if (!confirm(
-      `Giao phòng cho ${m.name}?\n\n` +
-        'Người đó thành chủ phòng và giữ mã khôi phục của phòng. Bạn hạ xuống Quản lý.'
-    )) return;
+  const handleTransferOwner = async (m) => {
+    if (
+      !(await askConfirm({
+        title: 'Giao quyền chủ phòng',
+        message:
+          `Giao phòng cho ${m.name}?\n\n` +
+          'Người đó thành chủ phòng và giữ mã khôi phục của phòng. Bạn hạ xuống Quản lý.',
+        confirmLabel: 'Giao phòng',
+        danger: true,
+      }))
+    )
+      return;
     return runWrite(`member:transfer:${m.id}`, async () => {
       const result = await transferOwner(roomId, m.id);
       if (!result.success) {
-        alert(result.error || 'Không giao phòng được.');
+        toast.error(result.error || 'Không giao phòng được.');
         return result;
       }
       await onAuthRefresh();
@@ -232,7 +262,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     runWrite(`joinreview:${request.id}:${decision}`, async () => {
       const result = await reviewJoinRequest(roomId, request.id, decision);
       if (!result.success) {
-        alert(result.error || 'Không xử lý được yêu cầu tham gia.');
+        toast.error(result.error || 'Không xử lý được yêu cầu tham gia.');
         return result;
       }
       const refreshed = await fetchJoinRequests(roomId);
@@ -247,7 +277,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
       const next = data?.settings?.join_approval === '0' ? '1' : '0';
       const result = await updateSettings(roomId, { join_approval: next });
       if (!result.success) {
-        alert(result.error || 'Không đổi được chế độ duyệt thành viên.');
+        toast.error(result.error || 'Không đổi được chế độ duyệt thành viên.');
         return result;
       }
       await onDataRefresh();
@@ -257,7 +287,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
   const handleSavePeriod = (e) => {
     e.preventDefault();
     if (!periodForm.title.trim()) {
-      alert('Vui lòng nhập tên kỳ (VD: Tháng 11/2026)!');
+      toast.error('Vui lòng nhập tên kỳ (VD: Tháng 11/2026)!');
       return;
     }
     return runWrite('period:new', async () => {
@@ -268,7 +298,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
         status: 'open',
       });
       if (!result.success) {
-        alert(result.error || 'Không tạo được kỳ.');
+        toast.error(result.error || 'Không tạo được kỳ.');
         return result;
       }
       setPeriodForm({ title: '', due_date: '' });
@@ -277,12 +307,20 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     });
   };
 
-  const handleDeletePeriod = (p) => {
-    if (!confirm(`Xóa kỳ "${p.title}"?\n\nMọi khoản chi và mọi phần đã ghi trong kỳ này bị xóa theo, không phục hồi được.`)) return;
+  const handleDeletePeriod = async (p) => {
+    if (
+      !(await askConfirm({
+        title: 'Xóa kỳ',
+        message: `Xóa kỳ "${p.title}"?\n\nMọi khoản chi và mọi phần đã ghi trong kỳ này bị xóa theo, không phục hồi được.`,
+        confirmLabel: 'Xóa kỳ',
+        danger: true,
+      }))
+    )
+      return;
     return runWrite(`period:delete:${p.id}`, async () => {
       const result = await deletePeriod(roomId, p.id);
       if (!result.success) {
-        alert(result.error || 'Không xóa được kỳ.');
+        toast.error(result.error || 'Không xóa được kỳ.');
         return result;
       }
       await onDataRefresh();
@@ -295,11 +333,11 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     return runWrite('settings', async () => {
       const result = await updateSettings(roomId, settingsForm);
       if (!result.success) {
-        alert(result.error || 'Không lưu được cài đặt.');
+        toast.error(result.error || 'Không lưu được cài đặt.');
         return result;
       }
       await onDataRefresh();
-      alert('Đã cập nhật thông tin phòng & tài khoản VietQR!');
+      toast.success('Đã cập nhật thông tin phòng & tài khoản VietQR!');
       return result;
     });
   };
@@ -348,12 +386,12 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
             </div>
             <div>
               <h2 className="font-bold text-base">Cài đặt phòng</h2>
-              <p className="text-[11px] text-slate-400">
+              <p className="text-xs text-slate-400">
                 {data?.room_name || roomId} · bạn là {ROLE_LABEL[me?.role] || me?.role}
               </p>
             </div>
             {anyBusy && (
-              <span className="flex items-center gap-1 text-[11px] font-bold text-indigo-300">
+              <span className="flex items-center gap-1 text-xs font-bold text-indigo-300">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 Đang lưu…
               </span>
@@ -396,7 +434,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                       <h4 className="text-xs font-bold text-amber-900">
                         Duyệt thành viên ({joinRequests.length})
                       </h4>
-                      <p className="text-[11px] text-amber-800 mt-1">
+                      <p className="text-xs text-amber-800 mt-1">
                         {requiresJoinApproval
                           ? 'Link mời cần chủ phòng duyệt trước khi tài khoản vào sổ.'
                           : 'Link mời được nhận ngay, không cần duyệt.'}
@@ -405,7 +443,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     <button
                       onClick={handleToggleJoinApproval}
                       disabled={anyBusy}
-                      className="shrink-0 px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-[10px] font-bold text-amber-900 disabled:opacity-50"
+                      className="shrink-0 px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-[11px] font-bold text-amber-900 disabled:opacity-50"
                     >
                       {isBusy('join_approval')
                         ? 'Đang lưu...'
@@ -426,7 +464,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                         <p className="text-xs font-bold text-slate-800">
                           {request.display_name || request.email} muốn vào hồ sơ {request.member_name}
                         </p>
-                        <p className="text-[10px] text-slate-500 truncate">
+                        <p className="text-[11px] text-slate-500 truncate">
                           {request.email} · quyền ban đầu: {ROLE_LABEL[request.role] || request.role}
                         </p>
                       </div>
@@ -434,7 +472,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                         <button
                           onClick={() => handleReviewJoinRequest(request, 'approve')}
                           disabled={anyBusy}
-                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[10px] font-bold disabled:opacity-50"
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[11px] font-bold disabled:opacity-50"
                         >
                           {isBusy(`joinreview:${request.id}:approve`) && (
                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -444,7 +482,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                         <button
                           onClick={() => handleReviewJoinRequest(request, 'reject')}
                           disabled={anyBusy}
-                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-[10px] font-bold disabled:opacity-50"
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-[11px] font-bold disabled:opacity-50"
                         >
                           {isBusy(`joinreview:${request.id}:reject`) && (
                             <Loader2 className="w-3 h-3 animate-spin" />
@@ -455,7 +493,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     </div>
                   ))}
                   {!joinRequests.length && !joinRequestsError && (
-                    <p className="text-[11px] text-amber-800">Chưa có yêu cầu nào chờ duyệt.</p>
+                    <p className="text-xs text-amber-800">Chưa có yêu cầu nào chờ duyệt.</p>
                   )}
                 </section>
               )}
@@ -466,7 +504,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 </h4>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Họ và tên:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Họ và tên:</label>
                     <input
                       value={memberForm.name}
                       onChange={(e) => setMemberForm({ ...memberForm, name: e.target.value })}
@@ -475,7 +513,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Biệt danh:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Biệt danh:</label>
                     <input
                       value={memberForm.nickname}
                       onChange={(e) => setMemberForm({ ...memberForm, nickname: e.target.value })}
@@ -484,7 +522,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Số điện thoại:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Số điện thoại:</label>
                     <input
                       value={memberForm.phone}
                       onChange={(e) => setMemberForm({ ...memberForm, phone: e.target.value })}
@@ -493,7 +531,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     />
                   </div>
                 </div>
-                <p className="text-[10px] text-slate-500">
+                <p className="text-[11px] text-slate-500">
                   Người mới chỉ vào được sổ khi có tài khoản: sau khi thêm, bấm "Tạo link" ở dòng
                   của họ và gửi link qua Zalo/SMS. Link có quyền Thành viên; chủ phòng có thể đổi quyền
                   sau khi duyệt.
@@ -520,16 +558,16 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                   ) : (
                     <>
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-bold text-indigo-900">
+                        <span className="text-xs font-bold text-indigo-900">
                           Link mời cho {invite.memberName} ({ROLE_LABEL[invite.role]})
                         </span>
-                        <span className="text-[10px] text-indigo-700 shrink-0">
+                        <span className="text-[11px] text-indigo-700 shrink-0">
                           hết hạn {new Date(invite.expires_at).toLocaleString('vi-VN', {
                             day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
                           })}
                         </span>
                       </div>
-                      <p className="text-[10px] text-indigo-800">
+                      <p className="text-[11px] text-indigo-800">
                         Link cấp quyền Thành viên. Sau khi nhận/duyệt, chủ phòng đổi quyền trong danh sách thành viên.
                       </p>
                       <div className="flex items-center gap-2">
@@ -537,12 +575,12 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           readOnly
                           value={invite.link}
                           onFocus={(e) => e.target.select()}
-                          className="flex-1 px-2.5 py-2 bg-white border border-indigo-200 rounded-lg text-[11px] font-mono text-slate-700 outline-none"
+                          className="flex-1 px-2.5 py-2 bg-white border border-indigo-200 rounded-lg text-xs font-mono text-slate-700 outline-none"
                         />
                         <button
                           type="button"
                           onClick={() => setShowInviteQr((v) => !v)}
-                          className={`p-2 border rounded-lg shrink-0 transition-colors ${
+                          className={`p-2 min-h-9 min-w-9 inline-flex items-center justify-center border rounded-lg shrink-0 transition-colors ${
                             showInviteQr
                               ? "bg-indigo-600 text-white border-indigo-600"
                               : "text-slate-600 hover:text-indigo-600 bg-white border-indigo-200"
@@ -565,7 +603,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                         <button
                           onClick={() => handleCreateInvite({ id: invite.member_id, name: invite.memberName })}
                           disabled={anyBusy}
-                          className="flex items-center gap-1 px-2.5 py-2 text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg shrink-0 hover:bg-indigo-100 disabled:opacity-50"
+                          className="flex items-center gap-1 px-2.5 py-2 text-xs font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg shrink-0 hover:bg-indigo-100 disabled:opacity-50"
                           title="Hủy link cũ và tạo link mới"
                         >
                           {isBusy(`invite:${invite.member_id}`) && (
@@ -577,7 +615,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
 
                       {showInviteQr && (
                         <div className="p-3 bg-white rounded-xl border border-indigo-100 flex flex-col items-center text-center space-y-2">
-                          <p className="text-[11px] font-bold text-slate-700">Quét mã QR để nhận quyền vào phòng</p>
+                          <p className="text-xs font-bold text-slate-700">Quét mã QR để nhận quyền vào phòng</p>
                           <div className="p-2 bg-white rounded-xl border border-slate-200 shadow-sm inline-block">
                             <img
                               src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(invite.link)}`}
@@ -586,10 +624,10 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                               loading="lazy"
                             />
                           </div>
-                          <p className="text-[10px] text-slate-400">Đưa camera điện thoại quét để mở trực tiếp</p>
+                          <p className="text-[11px] text-slate-400">Đưa camera điện thoại quét để mở trực tiếp</p>
                         </div>
                       )}
-                      <p className="text-[10px] text-indigo-700">
+                      <p className="text-[11px] text-indigo-700">
                         Link chỉ dùng được một lần và chỉ nhận cho đúng người này.
                       </p>
                     </>
@@ -620,27 +658,27 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                               {m.nickname ? ` (${m.nickname})` : ''}
                             </span>
                             {m.id === me?.member_id && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-900 text-white">
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-900 text-white">
                                 Bạn
                               </span>
                             )}
                             <span
-                              className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${ROLE_BADGE[m.role] || 'bg-slate-200 text-slate-700'}`}
+                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${ROLE_BADGE[m.role] || 'bg-slate-200 text-slate-700'}`}
                             >
                               {owner ? 'Chủ phòng' : m.role ? ROLE_LABEL[m.role] : 'Chưa có tài khoản'}
                             </span>
                             {gone && (
-                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600">
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600">
                                 Đã ngưng
                               </span>
                             )}
                           </div>
-                          <div className="text-[10px] text-slate-400 mt-0.5">
+                          <div className="text-[11px] text-slate-400 mt-0.5">
                             {hasAccount ? 'Có tài khoản' : 'Chưa có tài khoản'}
                             {m.phone ? ` · ${m.phone}` : ''}
                           </div>
                         </div>
-                        <span className="text-[10px] font-semibold text-slate-400 shrink-0">
+                        <span className="text-[11px] font-semibold text-slate-400 shrink-0">
                           {gone ? '' : hasAccount ? '' : 'Cần link mời'}
                         </span>
                       </div>
@@ -650,7 +688,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           <button
                             onClick={() => handleCreateInvite(m)}
                             disabled={anyBusy}
-                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors disabled:opacity-50"
                           >
                             {isBusy(`invite:${m.id}`) ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -667,7 +705,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                               value={m.role || 'member'}
                               onChange={(e) => handleRoleChange(m, e.target.value)}
                               disabled={anyBusy}
-                              className="px-2 py-1.5 rounded-lg text-[11px] font-semibold text-slate-700 bg-slate-50 border border-slate-200 disabled:opacity-50"
+                              className="px-2 py-1.5 rounded-lg text-xs font-semibold text-slate-700 bg-slate-50 border border-slate-200 disabled:opacity-50"
                               title="Đổi quyền trong phòng"
                             >
                               <option value="viewer">Chỉ xem</option>
@@ -684,7 +722,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           <button
                             onClick={() => handleUnlink(m)}
                             disabled={anyBusy}
-                            className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-50"
+                            className="p-2 min-h-9 min-w-9 inline-flex items-center justify-center text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-50"
                             title="Gỡ liên kết tài khoản (gửi link mời mới sau)"
                           >
                             {isBusy(`member:unlink:${m.id}`) ? (
@@ -699,7 +737,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           <button
                             onClick={() => handleTransferOwner(m)}
                             disabled={anyBusy}
-                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors disabled:opacity-50"
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors disabled:opacity-50"
                             title="Giao quyền chủ phòng"
                           >
                             {isBusy(`member:transfer:${m.id}`) ? (
@@ -715,7 +753,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           <button
                             onClick={() => handleDeactivate(m)}
                             disabled={anyBusy}
-                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 transition-colors disabled:opacity-50"
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 transition-colors disabled:opacity-50"
                             title="Ngưng hoạt động: mất quyền vào phòng, giữ lịch sử"
                           >
                             {isBusy(`member:deactivate:${m.id}`) ? (
@@ -731,7 +769,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           <button
                             onClick={() => handleReactivate(m)}
                             disabled={anyBusy}
-                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors disabled:opacity-50"
                             title="Cho phép vào phòng lại; cần link mới nếu chưa có tài khoản"
                           >
                             {isBusy(`member:reactivate:${m.id}`) ? (
@@ -758,7 +796,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 </h4>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Tên kỳ:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Tên kỳ:</label>
                     <input
                       value={periodForm.title}
                       onChange={(e) => setPeriodForm({ ...periodForm, title: e.target.value })}
@@ -767,7 +805,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Hạn nộp tiền:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Hạn nộp tiền:</label>
                     <input
                       type="date"
                       value={periodForm.due_date}
@@ -800,14 +838,14 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     <div>
                       <span className="font-semibold text-xs text-slate-800">{p.title}</span>
                       {p.due_date && (
-                        <span className="text-[11px] text-slate-400 block">Hạn: {p.due_date}</span>
+                        <span className="text-xs text-slate-400 block">Hạn: {p.due_date}</span>
                       )}
                     </div>
                     {isOwner && (
                       <button
                         onClick={() => handleDeletePeriod(p)}
                         disabled={anyBusy}
-                        className="p-1.5 text-slate-400 hover:text-rose-600 disabled:opacity-50"
+                        className="p-2 min-h-9 min-w-9 inline-flex items-center justify-center text-slate-400 hover:text-rose-600 disabled:opacity-50"
                         title="Xóa kỳ (chỉ chủ phòng)"
                       >
                         {isBusy(`period:delete:${p.id}`) ? (
@@ -891,7 +929,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     maxLength={6}
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 outline-none font-mono uppercase"
                   />
-                  <p className="text-[11px] text-slate-500 mt-1">
+                  <p className="text-xs text-slate-500 mt-1">
                     Nội dung sẽ là{' '}
                     <span className="font-mono text-slate-700">
                       TIEN PHONG {settingsForm.transfer_code} {`<tên bạn>`} {`<kỳ>`}
@@ -920,7 +958,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 <span className="text-xs font-semibold text-amber-900 flex items-center gap-1.5">
                   <KeyRound className="w-3.5 h-3.5" /> Mã khôi phục của phòng
                 </span>
-                <p className="text-[11px] text-amber-800">
+                <p className="text-xs text-amber-800">
                   Chỉ dùng khi chủ phòng mất mật khẩu tài khoản. Không ai xem được mã thật — máy chủ
                   chỉ giữ bản băm. Đổi mã thì mã cũ lập tức hết hiệu lực.
                 </p>
@@ -941,7 +979,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 )}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Mã mới:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Mã mới:</label>
                     <input
                       type="password"
                       inputMode="numeric"
@@ -952,7 +990,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Nhập lại:</label>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Nhập lại:</label>
                     <input
                       type="password"
                       inputMode="numeric"

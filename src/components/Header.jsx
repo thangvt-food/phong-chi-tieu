@@ -56,7 +56,7 @@ export default function Header({
                 </h1>
                 {role && (
                   <span
-                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${ROLE_BADGE[role] || 'bg-slate-200 text-slate-700'}`}
+                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${ROLE_BADGE[role] || 'bg-slate-200 text-slate-700'}`}
                   >
                     {ROLE_LABEL[role] || role}
                   </span>
@@ -68,7 +68,7 @@ export default function Header({
                 />
               </div>
               {me?.name && (
-                <p className="text-[10px] text-slate-500 leading-tight truncate">
+                <p className="text-[11px] text-slate-500 leading-tight truncate">
                   Bạn là {me.nickname || me.name}
                 </p>
               )}
@@ -87,20 +87,20 @@ export default function Header({
                     <p className="text-xs font-bold text-slate-900 truncate">
                       {user?.display_name || user?.username}
                     </p>
-                    <p className="text-[10px] text-slate-500 font-mono truncate">
+                    <p className="text-[11px] text-slate-500 font-mono truncate">
                       {user?.email || (user?.username ? `@${user.username}` : 'Tài khoản Google')}
                     </p>
                   </div>
                 </div>
 
-                <p className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 uppercase tracking-wider border-t border-slate-100">
+                <p className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-500 uppercase tracking-wider border-t border-slate-100">
                   Phòng của bạn ({rooms.length})
                 </p>
-                <p className="px-2.5 pb-1.5 text-[10px] text-slate-500">
+                <p className="px-2.5 pb-1.5 text-[11px] text-slate-500">
                   Một tài khoản dùng được nhiều phòng. Mỗi phòng có sổ và quyền riêng; chọn để chuyển.
                 </p>
                 {rooms.length === 0 && (
-                  <p className="px-2.5 py-1.5 text-[11px] text-slate-400">
+                  <p className="px-2.5 py-1.5 text-xs text-slate-400">
                     Chưa tham gia phòng nào.
                   </p>
                 )}
@@ -121,13 +121,13 @@ export default function Header({
                     <span className="min-w-0">
                       <span className="block truncate">{r.room_name}</span>
                       {r.member_name && (
-                        <span className="block text-[10px] font-normal text-slate-500 truncate">
+                        <span className="block text-[11px] font-normal text-slate-500 truncate">
                           {r.member_name}
                         </span>
                       )}
                     </span>
                     <span
-                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${ROLE_BADGE[r.role] || 'bg-slate-200 text-slate-700'}`}
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${ROLE_BADGE[r.role] || 'bg-slate-200 text-slate-700'}`}
                     >
                       {ROLE_LABEL[r.role] || r.role}
                     </span>
@@ -224,7 +224,7 @@ export default function Header({
           {canManage ? (
             <button
               onClick={onOpenSettings}
-              className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+              className="p-2 min-h-9 min-w-9 inline-flex items-center justify-center rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
               title="Cài đặt phòng"
             >
               <Settings className="w-4 h-4 stroke-[2]" />
@@ -232,7 +232,7 @@ export default function Header({
           ) : (
             <button
               onClick={() => setMenuOpen(true)}
-              className="p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+              className="p-2 min-h-9 min-w-9 inline-flex items-center justify-center rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors"
               title="Tài khoản"
             >
               <UserRound className="w-4 h-4 stroke-[2]" />

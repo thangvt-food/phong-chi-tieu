@@ -72,7 +72,7 @@ export default function ActivityLogModal({ isOpen, onClose, logs = [] }) {
             </div>
             <div>
               <h3 className="font-bold text-sm">Nhật ký hoạt động</h3>
-              <p className="text-[11px] text-slate-400">Minh bạch dòng tiền & thao tác trong phòng</p>
+              <p className="text-xs text-slate-400">Minh bạch dòng tiền & thao tác trong phòng</p>
             </div>
           </div>
           <button
@@ -149,7 +149,7 @@ export default function ActivityLogModal({ isOpen, onClose, logs = [] }) {
                       <span className="font-bold text-xs text-slate-900 truncate">
                         {log.user_name}
                       </span>
-                      <span className="text-[10px] text-slate-400 shrink-0 font-medium">
+                      <span className="text-[11px] text-slate-400 shrink-0 font-medium">
                         {fmtTime(log.created_at)}
                       </span>
                     </div>
@@ -165,7 +165,7 @@ export default function ActivityLogModal({ isOpen, onClose, logs = [] }) {
 
         {/* Footer */}
         <div className="p-3 bg-slate-50 border-t border-slate-100 flex items-center justify-between shrink-0">
-          <span className="text-[11px] text-slate-500 font-medium pl-1">
+          <span className="text-xs text-slate-500 font-medium pl-1">
             Hiển thị <span className="font-bold text-slate-700">{filteredLogs.length}</span> / {logs.length} hoạt động
           </span>
           <button

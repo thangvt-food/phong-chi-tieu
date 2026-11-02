@@ -48,12 +48,12 @@ export default function OverviewStats({
               <span>Đã thu</span>
             </div>
             <div className="flex items-center gap-1">
-              <span className="text-[11px] font-bold bg-emerald-100 px-1.5 py-0.2 rounded">
+              <span className="text-xs font-bold bg-emerald-100 px-1.5 py-0.2 rounded">
                 {paidCount}/{totalMembers}
               </span>
               {partialCount > 0 && (
                 <span
-                  className="text-[11px] font-bold bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded"
+                  className="text-xs font-bold bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded"
                   title="Số người đang trả dở"
                 >
                   +{partialCount} dở

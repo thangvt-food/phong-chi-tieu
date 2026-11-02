@@ -35,7 +35,7 @@ export default function PeriodSelector({
         <div className="shrink-0">
           {currentPeriod.status === 'completed' ? (
             <span
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 text-[11px] font-bold"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 text-xs font-bold"
               title="Đã hoàn thành"
             >
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 stroke-[2.5]" />
@@ -43,7 +43,7 @@ export default function PeriodSelector({
             </span>
           ) : (
             <span
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-100 text-amber-800 text-[11px] font-bold"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-100 text-amber-800 text-xs font-bold"
               title="Đang thu tiền"
             >
               <Clock className="w-3.5 h-3.5 text-amber-600 stroke-[2.5]" />

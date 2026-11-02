@@ -74,15 +74,15 @@ export default function MemberDetailModal({
   const skipped = (sharedExpenses || []).filter((e) => !joinedIds.has(e.id));
 
   const statusPill = isPaid ? (
-    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+    <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
       Đã nộp đủ
     </span>
   ) : isPartial ? (
-    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
+    <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">
       Trả dở {formatMoney(paidAmount)}/{formatMoney(totalAmount)}
     </span>
   ) : (
-    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-800">
+    <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-rose-100 text-rose-800">
       Chưa nộp
     </span>
   );
@@ -128,7 +128,7 @@ export default function MemberDetailModal({
             </div>
             {(isPartial || isPaid) && totalAmount > 0 && (
               <div className="mt-1.5">
-                <div className="flex justify-between text-[11px] font-bold text-slate-600 mb-1">
+                <div className="flex justify-between text-xs font-bold text-slate-600 mb-1">
                   <span className="text-emerald-700">Đã trả {formatMoney(paidAmount)}</span>
                   <span className="text-rose-700">Còn {formatMoney(remaining)}</span>
                 </div>
@@ -151,7 +151,7 @@ export default function MemberDetailModal({
               Tiền chung ({sharedItems.length} khoản • {formatMoney(sharedAmount)})
             </h4>
             {sharedItems.length === 0 ? (
-              <p className="text-[11px] text-slate-400 font-medium">
+              <p className="text-xs text-slate-400 font-medium">
                 Không tham gia khoản chung nào kỳ này.
               </p>
             ) : (
@@ -166,7 +166,7 @@ export default function MemberDetailModal({
                         {formatMoney(share)}
                       </span>
                     </div>
-                    <div className="text-[10px] font-semibold text-slate-400 truncate mt-0.5">
+                    <div className="text-[11px] font-semibold text-slate-400 truncate mt-0.5">
                       {fmtDate(expense.expense_date)}
                       {expense.expense_date ? ' • ' : ''}
                       {describeSplit(expense, members)} • bill {formatMoney(expense.amount)}
@@ -196,7 +196,7 @@ export default function MemberDetailModal({
                       </span>
                     </div>
                     {(item.expense_date || item.note) && (
-                      <div className="text-[10px] font-semibold text-slate-400 truncate mt-0.5">
+                      <div className="text-[11px] font-semibold text-slate-400 truncate mt-0.5">
                         {fmtDate(item.expense_date)}
                         {item.expense_date && item.note ? ' • ' : ''}
                         {item.note || ''}
@@ -219,10 +219,10 @@ export default function MemberDetailModal({
                 {skipped.map((e) => (
                   <div key={e.id} className="py-1.5 px-2.5 bg-slate-50/60">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-semibold text-slate-400 truncate">
+                      <span className="text-xs font-semibold text-slate-400 truncate">
                         {e.title}
                       </span>
-                      <span className="text-[11px] font-bold text-slate-300 shrink-0 line-through">
+                      <span className="text-xs font-bold text-slate-300 shrink-0 line-through">
                         {formatMoney(e.amount)}
                       </span>
                     </div>
@@ -239,7 +239,7 @@ export default function MemberDetailModal({
             <button
               onClick={() => { setConfirmOpen(true); setConfirmInput(''); setConfirmError(''); }}
               disabled={saving}
-              className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-xl transition-all active:scale-95 disabled:opacity-50 ${
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold rounded-xl transition-all active:scale-95 disabled:opacity-50 ${
                 isPaid
                   ? 'text-emerald-700 bg-emerald-100 hover:bg-emerald-200'
                   : isPartial
@@ -257,7 +257,7 @@ export default function MemberDetailModal({
               <span>{isPaid ? 'Đã nộp (bấm để hủy)' : isPartial ? 'Thu nốt cho đủ' : 'Đánh dấu đã nộp'}</span>
             </button>
           ) : (
-            <span className="text-[11px] font-semibold text-slate-400">
+            <span className="text-xs font-semibold text-slate-400">
               Bạn không có quyền đổi trạng thái nộp
             </span>
           )}
@@ -266,14 +266,14 @@ export default function MemberDetailModal({
               <button
                 onClick={() => onRecordPayment && onRecordPayment(calc)}
                 disabled={saving}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 bg-white border border-emerald-200 rounded-xl hover:bg-emerald-50 transition-all active:scale-95 disabled:opacity-50"
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-emerald-700 bg-white border border-emerald-200 rounded-xl hover:bg-emerald-50 transition-all active:scale-95 disabled:opacity-50"
               >
                 <HandCoins className="w-3.5 h-3.5" /> Thu góp
               </button>
             )}
             <button
               onClick={() => onOpenQr && onOpenQr(calc)}
-              className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-sm transition-all active:scale-95"
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-sm transition-all active:scale-95"
             >
               <QrCode className="w-3.5 h-3.5" /> QR
             </button>
@@ -300,7 +300,7 @@ export default function MemberDetailModal({
                   <h4 className="font-bold text-sm text-slate-900">
                     {isPaid ? "Xác nhận hủy thanh toán" : "Xác nhận xóa hết nợ"}
                   </h4>
-                  <p className="text-[11px] text-slate-500">{member.name}</p>
+                  <p className="text-xs text-slate-500">{member.name}</p>
                 </div>
               </div>
               <button
@@ -316,7 +316,7 @@ export default function MemberDetailModal({
               <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
                 <p>{isPaid ? "Số tiền sẽ hủy về 0 ₫:" : "Số tiền nợ sẽ xóa trắng:"}</p>
                 <p className="text-base font-extrabold text-indigo-600">{formatMoney(targetAmount)}</p>
-                <p className="text-[10px] text-slate-400">
+                <p className="text-[11px] text-slate-400">
                   Nhập chính xác số tiền trên để xác nhận thao tác.
                 </p>
               </div>
@@ -341,7 +341,7 @@ export default function MemberDetailModal({
               </div>
 
               {confirmError && (
-                <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-center gap-1.5">
+                <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-1.5">
                   <AlertCircle className="w-3.5 h-3.5 shrink-0" />
                   <span>{confirmError}</span>
                 </div>

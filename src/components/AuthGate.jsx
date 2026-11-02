@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import { AlertCircle, Home, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 import { authGoogle, claimInvite, recoverOwner } from '../services/api';
 import { signInWithGoogle } from '../services/firebase';
+import { useFeedback } from './Feedback';
 
 export default function AuthGate({ invite, roomHint, onAuthed, onCancel }) {
+  const { toast } = useFeedback();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [recoverOpen, setRecoverOpen] = useState(false);
@@ -41,9 +43,9 @@ export default function AuthGate({ invite, roomHint, onAuthed, onCancel }) {
         if (result.success && !result.pending) {
           claimedRoomId = result.room_id;
         } else if (result.pending) {
-          window.alert('Yêu cầu tham gia đã gửi cho chủ phòng. Bạn sẽ vào được phòng sau khi được duyệt.');
+          toast.success('Yêu cầu tham gia đã gửi cho chủ phòng. Bạn sẽ vào được phòng sau khi được duyệt.');
         } else {
-          window.alert(result.error || 'Không nhận được link mời này.');
+          toast.error(result.error || 'Không nhận được link mời này.');
         }
       }
       onAuthed({ claimedRoomId });
@@ -73,7 +75,7 @@ export default function AuthGate({ invite, roomHint, onAuthed, onCancel }) {
             </div>
             <div>
               <h1 className="font-bold text-base">Phòng chi tiêu</h1>
-              <p className="text-[11px] text-slate-400">
+              <p className="text-xs text-slate-400">
                 Tạo tài khoản hoặc đăng nhập bằng Google
               </p>
             </div>
@@ -112,7 +114,7 @@ export default function AuthGate({ invite, roomHint, onAuthed, onCancel }) {
             )}
             {busy ? 'Đang kết nối Google...' : 'Tiếp tục với Google'}
           </button>
-          <p className="text-[11px] text-center text-slate-500">
+          <p className="text-xs text-center text-slate-500">
             Tài khoản được tạo tự động lần đầu đăng nhập. Muốn vào phòng, hãy nhận link từ chủ phòng.
           </p>
         </div>
@@ -148,7 +150,7 @@ export default function AuthGate({ invite, roomHint, onAuthed, onCancel }) {
                 }}
                 className="px-5 pb-5 space-y-3"
               >
-                <p className="text-[11px] text-slate-500">
+                <p className="text-xs text-slate-500">
                   Đăng nhập Google rồi nhập PIN của phòng để nhận quyền chủ. PIN sẽ được đổi ngay sau khi xác nhận.
                 </p>
                 <input

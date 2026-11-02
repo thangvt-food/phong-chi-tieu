@@ -20,6 +20,7 @@ import {
   parseSplitConfig,
   calcExpenseShares,
 } from '../services/api';
+import { useFeedback } from './Feedback';
 
 const PRESETS = [
   { key: 'dien', label: 'Điện', icon: Zap, color: 'border-amber-400 bg-amber-50 text-amber-700' },
@@ -41,6 +42,7 @@ export default function ExpenseModal({
 }) {
   // NOTE: Mọi hook phải chạy trước mọi `return` (Rules of Hooks).
   // Không được `return null` ở đây — xem cuối hàm, sau useMemo.
+  const { toast } = useFeedback();
   const todayStr = new Date().toISOString().split('T')[0];
 
   const [pending, setPending] = useState(false);
@@ -192,7 +194,7 @@ export default function ExpenseModal({
     if (pending) return;
     const finalAmount = parseInt(amount) || 0;
     if (finalAmount <= 0) {
-      alert('Vui lòng nhập số tiền hợp lệ!');
+      toast.error('Vui lòng nhập số tiền hợp lệ!');
       return;
     }
 
@@ -201,7 +203,7 @@ export default function ExpenseModal({
     if (isSharedCategory) {
       if (splitMode === 'custom') {
         if (splitMemberIds.length === 0) {
-          alert('Hãy chọn ít nhất 1 người tham gia chia tiền!');
+          toast.error('Hãy chọn ít nhất 1 người tham gia chia tiền!');
           return;
         }
         if (splitMemberIds.length < members.length) {
@@ -209,17 +211,17 @@ export default function ExpenseModal({
         }
       } else if (splitMode === 'fixed') {
         if (fixedValid.length === 0) {
-          alert('Hãy nhập ít nhất 1 người chịu số tiền cố định!');
+          toast.error('Hãy nhập ít nhất 1 người chịu số tiền cố định!');
           return;
         }
         if (fixedTotal > finalAmount) {
-          alert(
+          toast.error(
             `Tổng cố định (${formatMoney(fixedTotal)}) đang vượt quá tổng bill (${formatMoney(finalAmount)})!`
           );
           return;
         }
         if (splitMemberIds.length === 0 && fixedTotal < finalAmount) {
-          alert('Còn dư tiền sau phần cố định nhưng chưa chọn ai để chia phần còn lại!');
+          toast.error('Còn dư tiền sau phần cố định nhưng chưa chọn ai để chia phần còn lại!');
           return;
         }
         split_config = { mode: 'fixed', member_ids: splitMemberIds, fixed: fixedValid };
@@ -450,7 +452,7 @@ export default function ExpenseModal({
                     key={opt.key}
                     type="button"
                     onClick={() => setSplitMode(opt.key)}
-                    className={`px-1 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                    className={`px-1 py-1.5 rounded-lg text-xs font-bold transition-all ${
                       splitMode === opt.key
                         ? 'bg-indigo-600 text-white shadow-sm'
                         : 'text-slate-600 hover:bg-slate-100'
@@ -463,7 +465,7 @@ export default function ExpenseModal({
 
               {/* Chế độ chia đều */}
               {splitMode === 'all' && (
-                <p className="text-[11px] font-medium text-slate-600 flex items-center gap-1">
+                <p className="text-xs font-medium text-slate-600 flex items-center gap-1">
                   <Users className="w-3.5 h-3.5 text-indigo-500" />
                   Chia đều cho cả {members.length} người trong phòng
                   {billAmount > 0 && (
@@ -478,22 +480,22 @@ export default function ExpenseModal({
               {splitMode === 'custom' && (
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold text-slate-600">
+                    <span className="text-xs font-bold text-slate-600">
                       Chia cho {splitMemberIds.length}/{members.length} người:
                     </span>
                     <div className="flex gap-1">
                       <button
                         type="button"
                         onClick={() => setSplitMemberIds(members.map((m) => m.id))}
-                        className="text-[10px] font-bold text-indigo-600 hover:underline"
+                        className="text-[11px] font-bold text-indigo-600 hover:underline"
                       >
                         Tất cả
                       </button>
-                      <span className="text-[10px] text-slate-300">|</span>
+                      <span className="text-[11px] text-slate-300">|</span>
                       <button
                         type="button"
                         onClick={() => setSplitMemberIds([])}
-                        className="text-[10px] font-bold text-slate-500 hover:underline"
+                        className="text-[11px] font-bold text-slate-500 hover:underline"
                       >
                         Bỏ hết
                       </button>
@@ -507,14 +509,14 @@ export default function ExpenseModal({
                           key={m.id}
                           type="button"
                           onClick={() => toggleSplitMember(m.id)}
-                          className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl border text-[11px] font-bold transition-all ${
+                          className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl border text-xs font-bold transition-all ${
                             checked
                               ? 'border-indigo-400 bg-indigo-600 text-white shadow-sm'
                               : 'border-slate-200 bg-white text-slate-600'
                           }`}
                         >
                           <span
-                            className={`w-3.5 h-3.5 rounded border flex items-center justify-center text-[10px] shrink-0 ${
+                            className={`w-3.5 h-3.5 rounded border flex items-center justify-center text-[11px] shrink-0 ${
                               checked ? 'bg-white text-indigo-700 border-white' : 'border-slate-300 text-transparent'
                             }`}
                           >
@@ -532,7 +534,7 @@ export default function ExpenseModal({
               {splitMode === 'fixed' && (
                 <div className="space-y-2">
                   <div className="space-y-1.5">
-                    <span className="text-[11px] font-bold text-slate-600">
+                    <span className="text-xs font-bold text-slate-600">
                       Ai chịu số cố định?
                     </span>
                     {fixedEntries.map((row, idx) => (
@@ -544,7 +546,7 @@ export default function ExpenseModal({
                             next[idx] = { ...next[idx], member_id: e.target.value };
                             setFixedEntries(next);
                           }}
-                          className="flex-1 px-2 py-1.5 bg-white border border-slate-200 rounded-xl text-[11px] font-bold outline-none"
+                          className="flex-1 px-2 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold outline-none"
                         >
                           <option value="">— Chọn người —</option>
                           {members.map((m) => (
@@ -563,7 +565,7 @@ export default function ExpenseModal({
                             next[idx] = { ...next[idx], amount: e.target.value };
                             setFixedEntries(next);
                           }}
-                          className="w-24 px-2 py-1.5 bg-white border border-slate-200 rounded-xl text-[11px] font-bold outline-none"
+                          className="w-24 px-2 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-bold outline-none"
                         />
                         {fixedEntries.length > 1 && (
                           <button
@@ -584,7 +586,7 @@ export default function ExpenseModal({
                           { member_id: '', amount: '' },
                         ])
                       }
-                      className="flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800"
+                      className="flex items-center gap-1 text-xs font-bold text-indigo-600 hover:text-indigo-800"
                     >
                       <Plus className="w-3 h-3" /> Thêm người cố định
                     </button>
@@ -592,14 +594,14 @@ export default function ExpenseModal({
 
                   <div className="space-y-1.5 pt-1 border-t border-indigo-100">
                     <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-bold text-slate-600">
+                      <span className="text-xs font-bold text-slate-600">
                         Phần còn lại ({formatMoney(remainder)}) chia cho:
                       </span>
                       {fixedValid.length > 0 && (
                         <button
                           type="button"
                           onClick={excludeFixedFromSplit}
-                          className="text-[10px] font-bold text-indigo-600 hover:underline"
+                          className="text-[11px] font-bold text-indigo-600 hover:underline"
                         >
                           Trừ người cố định
                         </button>
@@ -614,14 +616,14 @@ export default function ExpenseModal({
                             key={m.id}
                             type="button"
                             onClick={() => toggleSplitMember(m.id)}
-                            className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl border text-[11px] font-bold transition-all ${
+                            className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl border text-xs font-bold transition-all ${
                               checked
                                 ? 'border-indigo-400 bg-indigo-600 text-white shadow-sm'
                                 : 'border-slate-200 bg-white text-slate-600'
                             }`}
                           >
                             <span
-                              className={`w-3.5 h-3.5 rounded border flex items-center justify-center text-[10px] shrink-0 ${
+                              className={`w-3.5 h-3.5 rounded border flex items-center justify-center text-[11px] shrink-0 ${
                                 checked ? 'bg-white text-indigo-700 border-white' : 'border-slate-300 text-transparent'
                               }`}
                             >
@@ -642,7 +644,7 @@ export default function ExpenseModal({
               {/* Xem trước */}
               {splitPreview && billAmount > 0 && splitMode !== 'all' && (
                 <div className="p-2 rounded-xl bg-white border border-indigo-100 space-y-0.5">
-                  <span className="text-[10px] font-bold text-indigo-700 uppercase tracking-wide">
+                  <span className="text-[11px] font-bold text-indigo-700 uppercase tracking-wide">
                     Xem trước mỗi người trả:
                   </span>
                   {members
@@ -650,7 +652,7 @@ export default function ExpenseModal({
                     .map((m) => (
                       <div
                         key={m.id}
-                        className="flex justify-between text-[11px] font-semibold text-slate-700"
+                        className="flex justify-between text-xs font-semibold text-slate-700"
                       >
                         <span>{m.nickname || m.name}</span>
                         <span className="font-bold text-slate-900">

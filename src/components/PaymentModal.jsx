@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { X, HandCoins, RotateCcw, Loader2 } from 'lucide-react';
 import { formatMoney } from '../services/api';
+import { useFeedback } from './Feedback';
 
 export default function PaymentModal({ isOpen, onClose, calc, onConfirm, saving = false }) {
   // NOTE: hook phải chạy trước mọi `return` (Rules of Hooks).
+  const { toast, askConfirm } = useFeedback();
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
 
@@ -30,11 +32,11 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm, saving 
   const handleConfirm = () => {
     const add = parseInt(input) || 0;
     if (add <= 0) {
-      alert('Vui lòng nhập số tiền đã thu (lớn hơn 0)!');
+      toast.error('Vui lòng nhập số tiền đã thu (lớn hơn 0)!');
       return;
     }
     if (totalAmount <= 0) {
-      alert('Thành viên này không nợ gì trong kỳ này!');
+      toast.error('Thành viên này không nợ gì trong kỳ này!');
       return;
     }
     // Cộng dồn, chặn trần ở tổng phải nộp (không thu thừa)
@@ -42,8 +44,15 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm, saving 
     return submit(newPaid);
   };
 
-  const handleReset = () => {
-    if (confirm(`Xóa lịch sử đã trả của ${member.nickname || member.name}? (về 0 ₫)`)) {
+  const handleReset = async () => {
+    if (
+      await askConfirm({
+        title: 'Về 0 ₫',
+        message: `Xóa lịch sử đã trả của ${member.nickname || member.name}? (về 0 ₫)`,
+        confirmLabel: 'Xóa lịch sử',
+        danger: true,
+      })
+    ) {
       return submit(0);
     }
   };
@@ -59,7 +68,7 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm, saving 
             </div>
             <div>
               <h3 className="font-bold text-sm">Ghi nhận thanh toán</h3>
-              <p className="text-[11px] font-semibold text-emerald-300">{member.name}</p>
+              <p className="text-xs font-semibold text-emerald-300">{member.name}</p>
             </div>
           </div>
           <button
@@ -75,19 +84,19 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm, saving 
           {/* Totals */}
           <div className="grid grid-cols-3 gap-1.5 text-center">
             <div className="p-2 rounded-xl bg-slate-50 border border-slate-200">
-              <div className="text-[10px] font-bold text-slate-500 uppercase">Phải nộp</div>
+              <div className="text-[11px] font-bold text-slate-500 uppercase">Phải nộp</div>
               <div className="text-xs font-extrabold text-slate-900 mt-0.5">
                 {formatMoney(totalAmount)}
               </div>
             </div>
             <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-200">
-              <div className="text-[10px] font-bold text-emerald-700 uppercase">Đã trả</div>
+              <div className="text-[11px] font-bold text-emerald-700 uppercase">Đã trả</div>
               <div className="text-xs font-extrabold text-emerald-900 mt-0.5">
                 {formatMoney(paidAmount)}
               </div>
             </div>
             <div className="p-2 rounded-xl bg-rose-50 border border-rose-200">
-              <div className="text-[10px] font-bold text-rose-700 uppercase">Còn lại</div>
+              <div className="text-[11px] font-bold text-rose-700 uppercase">Còn lại</div>
               <div className="text-xs font-extrabold text-rose-900 mt-0.5">
                 {formatMoney(remaining)}
               </div>
@@ -122,7 +131,7 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm, saving 
               <button
                 type="button"
                 onClick={() => setInput(String(remaining))}
-                className="mt-1 text-[11px] font-bold text-emerald-700 hover:underline"
+                className="mt-1 text-xs font-bold text-emerald-700 hover:underline"
               >
                 Thu hết còn lại ({formatMoney(remaining)})
               </button>

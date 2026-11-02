@@ -100,7 +100,7 @@ export default function VietQrModal({
         <div className="px-4 py-3 bg-slate-900 text-white flex items-center justify-between shrink-0">
           <div>
             <h3 className="font-bold text-sm">Mã VietQR Chuyển Khoản</h3>
-            <p className="text-[11px] font-semibold text-indigo-300">{member.name}</p>
+            <p className="text-xs font-semibold text-indigo-300">{member.name}</p>
           </div>
           <button
             onClick={onClose}
@@ -151,24 +151,24 @@ export default function VietQrModal({
               <span className="font-bold text-slate-800">{formatMoney(sharedAmount)}</span>
             </div>
             {sharedItems.map(({ expense, share }) => (
-              <div key={expense.id} className="flex justify-between text-[11px] text-slate-500 font-medium pl-2">
+              <div key={expense.id} className="flex justify-between text-xs text-slate-500 font-medium pl-2">
                 <span className="truncate mr-2">• {expense.title}:</span>
                 <span className="shrink-0 font-semibold">{formatMoney(share)}</span>
               </div>
             ))}
             {personalItems.map((item) => (
-              <div key={item.id} className="flex justify-between text-[11px] text-rose-700 font-semibold pl-2">
+              <div key={item.id} className="flex justify-between text-xs text-rose-700 font-semibold pl-2">
                 <span>• {item.title}:</span>
                 <span>+{formatMoney(item.amount)}</span>
               </div>
             ))}
             <div className="pt-1 border-t border-slate-200 space-y-0.5">
-              <div className="flex justify-between items-center text-[11px] font-semibold text-slate-600">
+              <div className="flex justify-between items-center text-xs font-semibold text-slate-600">
                 <span>Tổng phải nộp:</span>
                 <span>{formatMoney(totalAmount)}</span>
               </div>
               {paidAmount > 0 && (
-                <div className="flex justify-between items-center text-[11px] font-semibold text-emerald-700">
+                <div className="flex justify-between items-center text-xs font-semibold text-emerald-700">
                   <span>Đã trả trước:</span>
                   <span>-{formatMoney(paidAmount)}</span>
                 </div>
@@ -219,7 +219,7 @@ export default function VietQrModal({
             <div className="flex items-center justify-between p-2 rounded-xl bg-slate-50 border border-slate-200">
               <span className="text-slate-600 font-semibold">Nội dung:</span>
               <div className="flex items-center gap-1.5">
-                <span className="font-mono font-bold text-slate-800 text-[11px] bg-white px-1.5 py-0.5 rounded border border-slate-200">
+                <span className="font-mono font-bold text-slate-800 text-xs bg-white px-1.5 py-0.5 rounded border border-slate-200">
                   {transferContent}
                 </span>
                 <button

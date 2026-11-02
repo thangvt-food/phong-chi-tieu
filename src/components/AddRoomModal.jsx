@@ -142,7 +142,7 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
             </div>
             <div>
               <h3 className="font-bold text-sm">Phòng chi tiêu</h3>
-              <p className="text-[11px] text-slate-400">
+              <p className="text-xs text-slate-400">
                 Tìm kiếm, tạo mới hoặc tham gia phòng
               </p>
             </div>
@@ -205,7 +205,7 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
               </div>
 
               <div className="space-y-2.5">
-                <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">
                   {searchResults.length ? `Tìm thấy ${searchResults.length} phòng` : 'Danh sách phòng'}
                 </p>
 
@@ -227,11 +227,11 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
                           <h4 className="font-bold text-sm text-slate-900 truncate">
                             {room.room_name}
                           </h4>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-200 text-slate-700 font-mono">
+                          <span className="text-[11px] px-1.5 py-0.5 rounded-md bg-slate-200 text-slate-700 font-mono">
                             {room.room_id}
                           </span>
                         </div>
-                        <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-1">
+                        <div className="flex items-center gap-3 text-xs text-slate-500 mt-1">
                           <span className="flex items-center gap-1 truncate">
                             <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                             {room.owner_name}
@@ -302,7 +302,7 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
                   <Link2 className="w-4 h-4 text-slate-400 absolute right-3.5 top-3" />
                 </div>
               </div>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-xs text-slate-500">
                 Link gắn với đúng tên và mức quyền chủ phòng đã chọn. Mỗi link chỉ dùng được một lần.
               </p>
               <div className="flex justify-end pt-2">
@@ -348,7 +348,7 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
                   placeholder="6–12 chữ số"
                   className={`${inputClass} font-mono tracking-widest`}
                 />
-                <p className="text-[11px] text-slate-500 mt-1 flex items-start gap-1">
+                <p className="text-xs text-slate-500 mt-1 flex items-start gap-1">
                   <ShieldQuestion className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                   Dùng khi bạn cần khôi phục quyền chủ phòng. Đừng dùng ngày sinh hay PIN ngân hàng.
                 </p>
