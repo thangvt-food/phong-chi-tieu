@@ -71,7 +71,7 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
 3. Dev full-stack local (frontend + backend Functions):
    ```bash
    # Tạo file .dev.vars (được gitignore) với FIRESTORE_SERVICE_ACCOUNT là JSON
-   # service account dùng cho môi trường dev và FIREBASE_PROJECT_ID=ant05-efa02.
+   # service account dùng cho môi trường dev và FIREBASE_PROJECT_ID=<FIREBASE_PROJECT_ID>.
    npm run dev:full      # chạy web :3000 + server API local :8788 cùng lúc
    ```
    Mở trình duyệt tại `http://localhost:3000`; mọi `/api` đi vào server local. Không dùng credential production trong máy chia sẻ hoặc môi trường không tin cậy.
@@ -79,7 +79,7 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    | Lệnh | Tác dụng |
    | ---- | -------- |
    | `npm run dev` | Web local, `/api` proxy sang server local (:8788) — không còn bắn thẳng production |
-   | `VITE_API_TARGET=https://phong-chi-tieu.pages.dev npm run dev` | Chủ đích cho dev bắn lên production |
+   | `VITE_API_TARGET=https://<PAGES_PROJECT>.pages.dev npm run dev` | Chủ đích cho dev bắn lên production |
    | `npm run dev:server` | Chỉ chạy server API local (:8788, cần `.dev.vars`) |
    | `npm run dev:full` | Web local + server API local cùng lúc |
    | `npm test` | Chạy unit tests xác minh Google token và Firestore REST client |
@@ -101,6 +101,9 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
 
 ## ☁️ Deploy Cloudflare Pages và Firestore
 
+> `<FIREBASE_PROJECT_ID>` và `<PAGES_PROJECT>` là giá trị thật khai trong
+> [`wrangler.toml`](./wrangler.toml) và `.firebaserc` — README cố ý không ghi lại.
+
 ### Cách 1: Deploy trực tiếp bằng Wrangler CLI
 
 1. **Đăng nhập Cloudflare**:
@@ -108,12 +111,12 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    npx wrangler login
    ```
 
-2. **Tạo Firestore database** trong Firebase Console của project `ant05-efa02` (Firestore Native, region `asia-southeast1`). Collection gốc của ứng dụng là `phongthuchi`.
+2. **Tạo Firestore database** trong Firebase Console của project `<FIREBASE_PROJECT_ID>` (Firestore Native, region `asia-southeast1`). Collection gốc của ứng dụng là `phongthuchi`.
 
 3. **Cấp quyền cho Cloudflare Pages**:
    - Tạo service account runtime riêng với quyền `roles/datastore.user`.
-   - Lưu JSON key vào Pages project `phong-chi-tieu` dưới secret `FIRESTORE_SERVICE_ACCOUNT` bằng `npx wrangler pages secret put FIRESTORE_SERVICE_ACCOUNT --project-name=phong-chi-tieu`.
-   - Biến `FIREBASE_PROJECT_ID=ant05-efa02` đã khai báo trong [`wrangler.toml`](./wrangler.toml).
+   - Lưu JSON key vào Pages project `<PAGES_PROJECT>` dưới secret `FIRESTORE_SERVICE_ACCOUNT` bằng `npx wrangler pages secret put FIRESTORE_SERVICE_ACCOUNT --project-name=<PAGES_PROJECT>`.
+   - Biến `FIREBASE_PROJECT_ID=<FIREBASE_PROJECT_ID>` đã khai báo trong [`wrangler.toml`](./wrangler.toml).
    - Quyền Datastore User áp dụng cho toàn Firestore của project, không chỉ collection `phongthuchi`; giữ credential bí mật và không đưa vào Git.
 
 4. **Sao chép D1 hiện hữu (nếu chưa copy)**:
@@ -129,9 +132,9 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    ```
 
 6. **Deploy lên Cloudflare Pages** (thiếu `--branch=production` là code chỉ lên Preview,
-   `phong-chi-tieu.pages.dev` vẫn chạy bản cũ):
+   `<PAGES_PROJECT>.pages.dev` vẫn chạy bản cũ):
    ```bash
-   npx wrangler pages deploy dist --project-name=phong-chi-tieu --branch=production
+   npx wrangler pages deploy dist --project-name=<PAGES_PROJECT> --branch=production
    ```
 
 ---
@@ -145,7 +148,7 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    - **Build command**: `npm run build`
    - **Build output directory**: `dist`
 4. Tạo secret `FIRESTORE_SERVICE_ACCOUNT` trong Pages -> **Settings** -> **Variables and Secrets**.
-5. Đảm bảo Firestore database của Firebase project `ant05-efa02` đã tồn tại và `FIREBASE_PROJECT_ID` được đặt là `ant05-efa02`.
+5. Đảm bảo Firestore database của Firebase project `<FIREBASE_PROJECT_ID>` đã tồn tại và `FIREBASE_PROJECT_ID` được đặt là `<FIREBASE_PROJECT_ID>`.
 6. Bấm **Redeploy** sau khi cập nhật secret.
 
 ---
@@ -153,9 +156,9 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
 ## 🔐 Google Auth, duyệt thành viên và PIN phòng
 
 - Bật **Google** provider trong Firebase Authentication -> Sign-in method. Thêm các host cần dùng (localhost, Pages production và preview domain) vào Authorized domains.
-- Firebase project phải là `ant05-efa02`; `FIREBASE_PROJECT_ID` được cấu hình trong [`wrangler.toml`](./wrangler.toml).
+- Firebase project phải là `<FIREBASE_PROJECT_ID>`; `FIREBASE_PROJECT_ID` được cấu hình trong [`wrangler.toml`](./wrangler.toml).
 - Google xác thực danh tính; API xác minh Firebase ID token rồi tạo phiên ứng dụng opaque. Hồ sơ tài khoản, membership, vai trò, sổ chi tiêu, PIN và yêu cầu duyệt lưu trong collection Firestore `phongthuchi`. Firebase Web API key là cấu hình client, không dùng làm bí mật server.
-- Pages Functions truy cập Firestore bằng secret `FIRESTORE_SERVICE_ACCOUNT`; không đưa JSON key vào repo. Service account có quyền `roles/datastore.user` cấp ở project nên có thể đọc/ghi toàn Firestore của `ant05-efa02`, dù app chỉ dùng collection `phongthuchi`.
+- Pages Functions truy cập Firestore bằng secret `FIRESTORE_SERVICE_ACCOUNT`; không đưa JSON key vào repo. Service account có quyền `roles/datastore.user` cấp ở project nên có thể đọc/ghi toàn Firestore của `<FIREBASE_PROJECT_ID>`, dù app chỉ dùng collection `phongthuchi`.
 - Người mới đăng nhập Google được tạo tài khoản tự động nhưng chưa có quyền vào phòng. Họ cần link mời riêng từ chủ phòng; vai trò ban đầu là `member` và chủ phòng có thể đổi sau khi vào phòng. Duyệt bật mặc định cho phòng cũ lẫn phòng mới; chủ phòng có thể tắt/bật ở tab Thành viên.
 - Từ version 5, đăng nhập username/mật khẩu cũ bị tắt và các hash mật khẩu cũ đã được xóa khỏi D1 trước khi copy. Chủ phòng dùng PIN để gắn tài khoản Google mới vào ghế chủ; với thành viên khác, chủ phòng cần gỡ liên kết tài khoản cũ rồi gửi link mời tới tài khoản Google mới. Membership, phòng và lịch sử chi tiêu được giữ lại trong Firestore.
 - PIN chỉ để khôi phục quyền `owner` của đúng phòng. Người dùng phải đăng nhập Google trước, nhập mã phòng, PIN hiện tại và PIN mới; PIN mới được lưu băm riêng trong Firestore. PIN không cấp quyền `manager`/`member` và không thay thế đăng nhập Google.
