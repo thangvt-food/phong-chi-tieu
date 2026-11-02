@@ -39,6 +39,7 @@ import {
   reviewJoinRequest,
 } from '../services/api';
 import { ROLE_BADGE, ROLE_LABEL, roleRank } from '../constants/roles';
+import { useBusyGuard } from '../hooks/useBusyGuard';
 
 export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDataRefresh, onAuthRefresh }) {
   const isOwner = me?.role === 'owner';
@@ -63,11 +64,10 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
   const [pinSuccess, setPinSuccess] = useState('');
 
   const [invite, setInvite] = useState(null);
-  const [inviteBusy, setInviteBusy] = useState('');
   const [inviteError, setInviteError] = useState('');
   const [joinRequests, setJoinRequests] = useState([]);
   const [joinRequestsError, setJoinRequestsError] = useState('');
-  const [joinApprovalBusy, setJoinApprovalBusy] = useState(false);
+  const { run: runWrite, isBusy, busy: anyBusy } = useBusyGuard();
 
   useEffect(() => {
     const s = data?.settings || {};
@@ -110,163 +110,201 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
   // Chỉ thao tác được lên người thấp quyền hơn mình; chủ phòng không bị đụng tới.
   const canActOn = (m) => m.id !== me?.member_id && roleRank(m.role) < myRank;
 
-  const handleSaveMember = async (e) => {
+  const handleSaveMember = (e) => {
     e.preventDefault();
     if (!memberForm.name.trim()) {
       alert('Vui lòng nhập họ và tên!');
       return;
     }
-    const result = await saveMember(roomId, {
-      name: memberForm.name.trim(),
-      nickname: memberForm.nickname.trim(),
-      phone: memberForm.phone.trim(),
+    return runWrite('member:new', async () => {
+      const result = await saveMember(roomId, {
+        name: memberForm.name.trim(),
+        nickname: memberForm.nickname.trim(),
+        phone: memberForm.phone.trim(),
+      });
+      if (!result.success) {
+        alert(result.error || 'Không thêm được thành viên.');
+        return result;
+      }
+      setMemberForm({ name: '', nickname: '', phone: '' });
+      await onDataRefresh();
+      return result;
     });
-    if (!result.success) {
-      alert(result.error || 'Không thêm được thành viên.');
-      return;
-    }
-    setMemberForm({ name: '', nickname: '', phone: '' });
-    onDataRefresh();
   };
 
-  const handleDeactivate = async (m) => {
+  const handleDeactivate = (m) => {
     if (!confirm(
       `Ngưng hoạt động ${m.name}?\n\n` +
         'Mất quyền vào phòng ngay lập tức. Tên, phần tiền và các khoản đã chia của người này ' +
         'vẫn nằm nguyên trong sổ các kỳ cũ.'
     )) return;
-    const result = await deactivateMember(roomId, m.id);
-    if (!result.success) {
-      alert(result.error || 'Không ngưng hoạt động được.');
-      return;
-    }
-    if (invite?.member_id === m.id) setInvite(null);
-    onDataRefresh();
+    return runWrite(`member:deactivate:${m.id}`, async () => {
+      const result = await deactivateMember(roomId, m.id);
+      if (!result.success) {
+        alert(result.error || 'Không ngưng hoạt động được.');
+        return result;
+      }
+      if (invite?.member_id === m.id) setInvite(null);
+      await onDataRefresh();
+      return result;
+    });
   };
 
-  const handleReactivate = async (m) => {
-    const result = await reactivateMember(roomId, m.id);
-    if (!result.success) {
-      alert(result.error || 'Không thêm lại được.');
-      return;
-    }
-    onDataRefresh();
-  };
+  const handleReactivate = (m) =>
+    runWrite(`member:reactivate:${m.id}`, async () => {
+      const result = await reactivateMember(roomId, m.id);
+      if (!result.success) {
+        alert(result.error || 'Không thêm lại được.');
+        return result;
+      }
+      await onDataRefresh();
+      return result;
+    });
 
-  const handleRoleChange = async (m, role) => {
+  const handleRoleChange = (m, role) => {
     if (role === m.role) return;
     if (!confirm(`Đổi quyền của ${m.name} thành "${ROLE_LABEL[role]}"?`)) return;
-    const result = await setMemberRole(roomId, m.id, role);
-    if (!result.success) {
-      alert(result.error || 'Không đổi được quyền.');
-      return;
-    }
-    onDataRefresh();
+    return runWrite(`member:role:${m.id}`, async () => {
+      const result = await setMemberRole(roomId, m.id, role);
+      if (!result.success) {
+        alert(result.error || 'Không đổi được quyền.');
+        return result;
+      }
+      await onDataRefresh();
+      return result;
+    });
   };
 
-  const handleUnlink = async (m) => {
+  const handleUnlink = (m) => {
     if (!confirm(
       `Gỡ tài khoản khỏi ${m.name}?\n\n` +
         'Tài khoản của người đó mất quyền vào phòng này (các phòng khác không đổi). ' +
         'Muốn vào lại thì bạn gửi một link mời mới. Lịch sử tiền vẫn giữ nguyên.'
     )) return;
-    const result = await unlinkMember(roomId, m.id);
-    if (!result.success) {
-      alert(result.error || 'Không gỡ được liên kết.');
-      return;
-    }
-    onDataRefresh();
+    return runWrite(`member:unlink:${m.id}`, async () => {
+      const result = await unlinkMember(roomId, m.id);
+      if (!result.success) {
+        alert(result.error || 'Không gỡ được liên kết.');
+        return result;
+      }
+      await onDataRefresh();
+      return result;
+    });
   };
 
-  const handleTransferOwner = async (m) => {
+  const handleTransferOwner = (m) => {
     if (!confirm(
       `Giao phòng cho ${m.name}?\n\n` +
         'Người đó thành chủ phòng và giữ mã khôi phục của phòng. Bạn hạ xuống Quản lý.'
     )) return;
-    const result = await transferOwner(roomId, m.id);
-    if (!result.success) {
-      alert(result.error || 'Không giao phòng được.');
-      return;
-    }
-    await onAuthRefresh();
-  };
-
-  const handleCreateInvite = async (member) => {
-    setInviteBusy(member.id);
-    setInviteError('');
-    const result = await createInvite(roomId, member.id);
-    setInviteBusy('');
-    if (!result.success) {
-      setInvite(null);
-      setInviteError(result.error || 'Không tạo được link mời.');
-      return;
-    }
-    const base = window.location.origin + window.location.pathname;
-    setInvite({
-      member_id: member.id,
-      memberName: member.nickname || member.name,
-      role: result.role || 'member',
-      link: `${base}?j=${result.token}`,
-      expires_at: result.expires_at,
+    return runWrite(`member:transfer:${m.id}`, async () => {
+      const result = await transferOwner(roomId, m.id);
+      if (!result.success) {
+        alert(result.error || 'Không giao phòng được.');
+        return result;
+      }
+      await onAuthRefresh();
+      return result;
     });
   };
 
-  const handleReviewJoinRequest = async (request, decision) => {
-    const result = await reviewJoinRequest(roomId, request.id, decision);
-    if (!result.success) {
-      alert(result.error || 'Không xử lý được yêu cầu tham gia.');
-      return;
-    }
-    const refreshed = await fetchJoinRequests(roomId);
-    if (refreshed.success) setJoinRequests(refreshed.requests);
-    else setJoinRequestsError(refreshed.error || 'Không tải được yêu cầu tham gia.');
-    if (decision === 'approve') await onDataRefresh();
-  };
+  const handleCreateInvite = (member) =>
+    runWrite(`invite:${member.id}`, async () => {
+      setInviteError('');
+      const result = await createInvite(roomId, member.id);
+      if (!result.success) {
+        setInvite(null);
+        setInviteError(result.error || 'Không tạo được link mời.');
+        return result;
+      }
+      const base = window.location.origin + window.location.pathname;
+      setInvite({
+        member_id: member.id,
+        memberName: member.nickname || member.name,
+        role: result.role || 'member',
+        link: `${base}?j=${result.token}`,
+        expires_at: result.expires_at,
+      });
+      return result;
+    });
 
-  const handleToggleJoinApproval = async () => {
-    setJoinApprovalBusy(true);
-    const next = data?.settings?.join_approval === '0' ? '1' : '0';
-    const result = await updateSettings(roomId, { join_approval: next });
-    setJoinApprovalBusy(false);
-    if (!result.success) {
-      alert(result.error || 'Không đổi được chế độ duyệt thành viên.');
-      return;
-    }
-    await onDataRefresh();
-  };
+  const handleReviewJoinRequest = (request, decision) =>
+    runWrite(`joinreview:${request.id}:${decision}`, async () => {
+      const result = await reviewJoinRequest(roomId, request.id, decision);
+      if (!result.success) {
+        alert(result.error || 'Không xử lý được yêu cầu tham gia.');
+        return result;
+      }
+      const refreshed = await fetchJoinRequests(roomId);
+      if (refreshed.success) setJoinRequests(refreshed.requests);
+      else setJoinRequestsError(refreshed.error || 'Không tải được yêu cầu tham gia.');
+      if (decision === 'approve') await onDataRefresh();
+      return result;
+    });
 
-  const handleSavePeriod = async (e) => {
+  const handleToggleJoinApproval = () =>
+    runWrite('join_approval', async () => {
+      const next = data?.settings?.join_approval === '0' ? '1' : '0';
+      const result = await updateSettings(roomId, { join_approval: next });
+      if (!result.success) {
+        alert(result.error || 'Không đổi được chế độ duyệt thành viên.');
+        return result;
+      }
+      await onDataRefresh();
+      return result;
+    });
+
+  const handleSavePeriod = (e) => {
     e.preventDefault();
     if (!periodForm.title.trim()) {
       alert('Vui lòng nhập tên kỳ (VD: Tháng 11/2026)!');
       return;
     }
-    const result = await savePeriod(roomId, {
-      id: 'period_' + Date.now(),
-      title: periodForm.title.trim(),
-      due_date: periodForm.due_date,
-      status: 'open',
+    return runWrite('period:new', async () => {
+      const result = await savePeriod(roomId, {
+        id: 'period_' + Date.now(),
+        title: periodForm.title.trim(),
+        due_date: periodForm.due_date,
+        status: 'open',
+      });
+      if (!result.success) {
+        alert(result.error || 'Không tạo được kỳ.');
+        return result;
+      }
+      setPeriodForm({ title: '', due_date: '' });
+      await onDataRefresh();
+      return result;
     });
-    if (!result.success) {
-      alert(result.error || 'Không tạo được kỳ.');
-      return;
-    }
-    setPeriodForm({ title: '', due_date: '' });
-    onDataRefresh();
   };
 
-  const handleSaveSettings = async (e) => {
+  const handleDeletePeriod = (p) => {
+    if (!confirm(`Xóa kỳ "${p.title}"?\n\nMọi khoản chi và mọi phần đã ghi trong kỳ này bị xóa theo, không phục hồi được.`)) return;
+    return runWrite(`period:delete:${p.id}`, async () => {
+      const result = await deletePeriod(roomId, p.id);
+      if (!result.success) {
+        alert(result.error || 'Không xóa được kỳ.');
+        return result;
+      }
+      await onDataRefresh();
+      return result;
+    });
+  };
+
+  const handleSaveSettings = (e) => {
     e.preventDefault();
-    const result = await updateSettings(roomId, settingsForm);
-    if (!result.success) {
-      alert(result.error || 'Không lưu được cài đặt.');
-      return;
-    }
-    await onDataRefresh();
-    alert('Đã cập nhật thông tin phòng & tài khoản VietQR!');
+    return runWrite('settings', async () => {
+      const result = await updateSettings(roomId, settingsForm);
+      if (!result.success) {
+        alert(result.error || 'Không lưu được cài đặt.');
+        return result;
+      }
+      await onDataRefresh();
+      alert('Đã cập nhật thông tin phòng & tài khoản VietQR!');
+      return result;
+    });
   };
 
-  const handleSavePin = async (e) => {
+  const handleSavePin = (e) => {
     e.preventDefault();
     setPinError('');
     setPinSuccess('');
@@ -278,14 +316,17 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
       setPinError('Hai lần nhập mã không khớp.');
       return;
     }
-    const result = await setRoomPin(roomId, pinForm.pin);
-    if (!result.success) {
-      setPinError(result.error || 'Không đổi được mã khôi phục.');
-      return;
-    }
-    setPinForm({ pin: '', confirm: '' });
-    setPinSuccess('Đã đổi mã khôi phục. Mã cũ không còn dùng được.');
-    setTimeout(() => setPinSuccess(''), 5000);
+    return runWrite('pin', async () => {
+      const result = await setRoomPin(roomId, pinForm.pin);
+      if (!result.success) {
+        setPinError(result.error || 'Không đổi được mã khôi phục.');
+        return result;
+      }
+      setPinForm({ pin: '', confirm: '' });
+      setPinSuccess('Đã đổi mã khôi phục. Mã cũ không còn dùng được.');
+      setTimeout(() => setPinSuccess(''), 5000);
+      return result;
+    });
   };
 
   const requiresJoinApproval = data?.settings?.join_approval !== '0';
@@ -311,6 +352,12 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 {data?.room_name || roomId} · bạn là {ROLE_LABEL[me?.role] || me?.role}
               </p>
             </div>
+            {anyBusy && (
+              <span className="flex items-center gap-1 text-[11px] font-bold text-indigo-300">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Đang lưu…
+              </span>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -357,10 +404,10 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     </div>
                     <button
                       onClick={handleToggleJoinApproval}
-                      disabled={joinApprovalBusy}
+                      disabled={anyBusy}
                       className="shrink-0 px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-[10px] font-bold text-amber-900 disabled:opacity-50"
                     >
-                      {joinApprovalBusy
+                      {isBusy('join_approval')
                         ? 'Đang lưu...'
                         : requiresJoinApproval
                           ? 'Tắt duyệt'
@@ -386,14 +433,22 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                       <div className="flex gap-1.5">
                         <button
                           onClick={() => handleReviewJoinRequest(request, 'approve')}
-                          className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[10px] font-bold"
+                          disabled={anyBusy}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[10px] font-bold disabled:opacity-50"
                         >
+                          {isBusy(`joinreview:${request.id}:approve`) && (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          )}
                           Duyệt
                         </button>
                         <button
                           onClick={() => handleReviewJoinRequest(request, 'reject')}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-[10px] font-bold"
+                          disabled={anyBusy}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-[10px] font-bold disabled:opacity-50"
                         >
+                          {isBusy(`joinreview:${request.id}:reject`) && (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          )}
                           Từ chối
                         </button>
                       </div>
@@ -446,8 +501,10 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 <div className="flex justify-end">
                   <button
                     type="submit"
-                    className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm"
+                    disabled={anyBusy}
+                    className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm disabled:opacity-50"
                   >
+                    {isBusy('member:new') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                     Thêm vào sổ
                   </button>
                 </div>
@@ -507,9 +564,13 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                         </button>
                         <button
                           onClick={() => handleCreateInvite({ id: invite.member_id, name: invite.memberName })}
-                          className="px-2.5 py-2 text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg shrink-0 hover:bg-indigo-100"
+                          disabled={anyBusy}
+                          className="flex items-center gap-1 px-2.5 py-2 text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg shrink-0 hover:bg-indigo-100 disabled:opacity-50"
                           title="Hủy link cũ và tạo link mới"
                         >
+                          {isBusy(`invite:${invite.member_id}`) && (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          )}
                           Tạo mã mới
                         </button>
                       </div>
@@ -588,10 +649,10 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                         {!gone && !hasAccount && !owner && (
                           <button
                             onClick={() => handleCreateInvite(m)}
-                            disabled={inviteBusy === m.id}
+                            disabled={anyBusy}
                             className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors disabled:opacity-50"
                           >
-                            {inviteBusy === m.id ? (
+                            {isBusy(`invite:${m.id}`) ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Link2 className="w-3.5 h-3.5" />
@@ -601,55 +662,84 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                         )}
 
                         {isOwner && hasAccount && !owner && m.id !== me?.member_id && (
-                          <select
-                            value={m.role || 'member'}
-                            onChange={(e) => handleRoleChange(m, e.target.value)}
-                            className="px-2 py-1.5 rounded-lg text-[11px] font-semibold text-slate-700 bg-slate-50 border border-slate-200"
-                            title="Đổi quyền trong phòng"
-                          >
-                            <option value="viewer">Chỉ xem</option>
-                            <option value="member">Thành viên</option>
-                            <option value="manager">Quản lý</option>
-                          </select>
+                          <span className="flex items-center gap-1">
+                            <select
+                              value={m.role || 'member'}
+                              onChange={(e) => handleRoleChange(m, e.target.value)}
+                              disabled={anyBusy}
+                              className="px-2 py-1.5 rounded-lg text-[11px] font-semibold text-slate-700 bg-slate-50 border border-slate-200 disabled:opacity-50"
+                              title="Đổi quyền trong phòng"
+                            >
+                              <option value="viewer">Chỉ xem</option>
+                              <option value="member">Thành viên</option>
+                              <option value="manager">Quản lý</option>
+                            </select>
+                            {isBusy(`member:role:${m.id}`) && (
+                              <Loader2 className="w-3 h-3 animate-spin text-indigo-600" />
+                            )}
+                          </span>
                         )}
 
                         {isOwner && hasAccount && !owner && m.id !== me?.member_id && (
                           <button
                             onClick={() => handleUnlink(m)}
-                            className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
+                            disabled={anyBusy}
+                            className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-colors disabled:opacity-50"
                             title="Gỡ liên kết tài khoản (gửi link mời mới sau)"
                           >
-                            <ShieldAlert className="w-3.5 h-3.5" />
+                            {isBusy(`member:unlink:${m.id}`) ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <ShieldAlert className="w-3.5 h-3.5" />
+                            )}
                           </button>
                         )}
 
                         {isOwner && !owner && !gone && hasAccount && (
                           <button
                             onClick={() => handleTransferOwner(m)}
-                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
+                            disabled={anyBusy}
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors disabled:opacity-50"
                             title="Giao quyền chủ phòng"
                           >
-                            <Crown className="w-3.5 h-3.5" /> Giao phòng
+                            {isBusy(`member:transfer:${m.id}`) ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Crown className="w-3.5 h-3.5" />
+                            )}{' '}
+                            Giao phòng
                           </button>
                         )}
 
                         {canActOn(m) && !gone && !owner && activeCount > 1 && (
                           <button
                             onClick={() => handleDeactivate(m)}
-                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 transition-colors"
+                            disabled={anyBusy}
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 transition-colors disabled:opacity-50"
                             title="Ngưng hoạt động: mất quyền vào phòng, giữ lịch sử"
                           >
-                            <UserX className="w-3.5 h-3.5" /> Ngưng
+                            {isBusy(`member:deactivate:${m.id}`) ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <UserX className="w-3.5 h-3.5" />
+                            )}{' '}
+                            Ngưng
                           </button>
                         )}
 
                         {canActOn(m) && gone && (
                           <button
                             onClick={() => handleReactivate(m)}
-                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors"
+                            disabled={anyBusy}
+                            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors disabled:opacity-50"
                             title="Cho phép vào phòng lại; cần link mới nếu chưa có tài khoản"
                           >
-                            <UserCheck className="w-3.5 h-3.5" /> Thêm lại
+                            {isBusy(`member:reactivate:${m.id}`) ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <UserCheck className="w-3.5 h-3.5" />
+                            )}{' '}
+                            Thêm lại
                           </button>
                         )}
                       </div>
@@ -689,8 +779,10 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 <div className="flex justify-end">
                   <button
                     type="submit"
-                    className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm"
+                    disabled={anyBusy}
+                    className="flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm disabled:opacity-50"
                   >
+                    {isBusy('period:new') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                     Tạo kỳ
                   </button>
                 </div>
@@ -713,19 +805,16 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                     </div>
                     {isOwner && (
                       <button
-                        onClick={async () => {
-                          if (!confirm(`Xóa kỳ "${p.title}"?\n\nMọi khoản chi và mọi phần đã ghi trong kỳ này bị xóa theo, không phục hồi được.`)) return;
-                          const result = await deletePeriod(roomId, p.id);
-                          if (!result.success) {
-                            alert(result.error || 'Không xóa được kỳ.');
-                            return;
-                          }
-                          await onDataRefresh();
-                        }}
-                        className="p-1.5 text-slate-400 hover:text-rose-600"
+                        onClick={() => handleDeletePeriod(p)}
+                        disabled={anyBusy}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 disabled:opacity-50"
                         title="Xóa kỳ (chỉ chủ phòng)"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        {isBusy(`period:delete:${p.id}`) ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="w-3.5 h-3.5" />
+                        )}
                       </button>
                     )}
                   </div>
@@ -815,9 +904,11 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
               <div className="flex justify-end pt-2">
                 <button
                   type="submit"
-                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
+                  disabled={anyBusy}
+                  className="flex items-center gap-1.5 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
                 >
-                  Lưu cài đặt
+                  {isBusy('settings') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {isBusy('settings') ? 'Đang lưu…' : 'Lưu cài đặt'}
                 </button>
               </div>
             </form>
@@ -874,9 +965,11 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 <div className="flex justify-end">
                   <button
                     type="submit"
-                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
+                    disabled={anyBusy}
+                    className="flex items-center gap-1.5 px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors disabled:opacity-50"
                   >
-                    Đổi mã khôi phục
+                    {isBusy('pin') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    {isBusy('pin') ? 'Đang đổi…' : 'Đổi mã khôi phục'}
                   </button>
                 </div>
               </form>

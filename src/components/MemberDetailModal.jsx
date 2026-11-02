@@ -6,6 +6,7 @@ import {
   XCircle,
   CircleDot,
   HandCoins,
+  Loader2,
   Users,
   UserCheck,
   EyeOff,
@@ -29,9 +30,13 @@ export default function MemberDetailModal({
   onOpenQr,
   onTogglePaid,
   onRecordPayment,
+  saving = false,
 }) {
-  // NOTE: không có hook nào ngoài props nên không lo Rules of Hooks,
-  // nhưng vẫn giữ `return null` ngay đầu để rõ ràng.
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmInput, setConfirmInput] = useState('');
+  const [confirmError, setConfirmError] = useState('');
+  const [pending, setPending] = useState(false);
+
   if (!isOpen || !calc) return null;
 
   const {
@@ -47,21 +52,22 @@ export default function MemberDetailModal({
     isPaid,
   } = calc;
 
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmInput, setConfirmInput] = useState('');
-  const [confirmError, setConfirmError] = useState('');
-
   const targetAmount = isPaid ? paidAmount : (isPartial ? (totalAmount - paidAmount) : totalAmount);
 
-  const handleConfirmSubmit = (e) => {
+  const handleConfirmSubmit = async (e) => {
     e.preventDefault();
     const num = parseInt(confirmInput.replace(/\D/g, ''), 10) || 0;
     if (num !== targetAmount) {
       setConfirmError(`Số tiền không khớp! Hãy nhập chính xác ${targetAmount.toLocaleString('vi-VN')}`);
       return;
     }
-    setConfirmOpen(false);
-    if (onTogglePaid) onTogglePaid(calc);
+    setPending(true);
+    try {
+      const res = await onTogglePaid(calc);
+      if (res?.success) setConfirmOpen(false);
+    } finally {
+      setPending(false);
+    }
   };
 
   const joinedIds = new Set(sharedItems.map((s) => s.expense.id));
@@ -232,7 +238,8 @@ export default function MemberDetailModal({
           {canAct ? (
             <button
               onClick={() => { setConfirmOpen(true); setConfirmInput(''); setConfirmError(''); }}
-              className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-xl transition-all active:scale-95 ${
+              disabled={saving}
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-xl transition-all active:scale-95 disabled:opacity-50 ${
                 isPaid
                   ? 'text-emerald-700 bg-emerald-100 hover:bg-emerald-200'
                   : isPartial
@@ -258,7 +265,8 @@ export default function MemberDetailModal({
             {canAct && (
               <button
                 onClick={() => onRecordPayment && onRecordPayment(calc)}
-                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 bg-white border border-emerald-200 rounded-xl hover:bg-emerald-50 transition-all active:scale-95"
+                disabled={saving}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold text-emerald-700 bg-white border border-emerald-200 rounded-xl hover:bg-emerald-50 transition-all active:scale-95 disabled:opacity-50"
               >
                 <HandCoins className="w-3.5 h-3.5" /> Thu góp
               </button>
@@ -275,7 +283,7 @@ export default function MemberDetailModal({
       {confirmOpen && (
         <div 
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn"
-          onClick={() => setConfirmOpen(false)}
+          onClick={() => { if (!pending) setConfirmOpen(false); }}
         >
           <div 
             className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl border border-slate-100 p-5 space-y-4"
@@ -297,7 +305,8 @@ export default function MemberDetailModal({
               </div>
               <button
                 onClick={() => setConfirmOpen(false)}
-                className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                disabled={pending}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 disabled:opacity-50"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -342,17 +351,26 @@ export default function MemberDetailModal({
                 <button
                   type="button"
                   onClick={() => setConfirmOpen(false)}
-                  className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                  disabled={pending}
+                  className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl disabled:opacity-50"
                 >
                   Hủy
                 </button>
                 <button
                   type="submit"
-                  className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors ${
+                  disabled={pending || saving}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors disabled:opacity-50 ${
                     isPaid ? "bg-rose-600 hover:bg-rose-700" : "bg-emerald-600 hover:bg-emerald-700"
                   }`}
                 >
-                  {isPaid ? "Xác nhận hủy nộp" : "Xác nhận xóa nợ"}
+                  {pending ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Đang lưu…
+                    </>
+                  ) : (
+                    isPaid ? "Xác nhận hủy nộp" : "Xác nhận xóa nợ"
+                  )}
                 </button>
               </div>
             </form>

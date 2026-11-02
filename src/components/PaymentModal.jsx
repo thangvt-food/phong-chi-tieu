@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { X, HandCoins, RotateCcw } from 'lucide-react';
+import { X, HandCoins, RotateCcw, Loader2 } from 'lucide-react';
 import { formatMoney } from '../services/api';
 
-export default function PaymentModal({ isOpen, onClose, calc, onConfirm }) {
+export default function PaymentModal({ isOpen, onClose, calc, onConfirm, saving = false }) {
   // NOTE: hook phải chạy trước mọi `return` (Rules of Hooks).
   const [input, setInput] = useState('');
+  const [pending, setPending] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -15,6 +16,16 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm }) {
   if (!isOpen || !calc) return null;
 
   const { member, totalAmount = 0, paidAmount = 0, remaining = 0 } = calc;
+
+  const submit = async (newPaid) => {
+    setPending(true);
+    try {
+      const res = await onConfirm(newPaid);
+      if (res?.success) onClose();
+    } finally {
+      setPending(false);
+    }
+  };
 
   const handleConfirm = () => {
     const add = parseInt(input) || 0;
@@ -28,14 +39,12 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm }) {
     }
     // Cộng dồn, chặn trần ở tổng phải nộp (không thu thừa)
     const newPaid = Math.min(totalAmount, paidAmount + add);
-    onConfirm(newPaid);
-    onClose();
+    return submit(newPaid);
   };
 
   const handleReset = () => {
     if (confirm(`Xóa lịch sử đã trả của ${member.nickname || member.name}? (về 0 ₫)`)) {
-      onConfirm(0);
-      onClose();
+      return submit(0);
     }
   };
 
@@ -55,7 +64,8 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm }) {
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-full text-slate-400 hover:text-white transition-colors"
+            disabled={pending}
+            className="p-1 rounded-full text-slate-400 hover:text-white transition-colors disabled:opacity-50"
           >
             <X className="w-4 h-4" />
           </button>
@@ -125,9 +135,10 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm }) {
               <button
                 type="button"
                 onClick={handleReset}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-xl transition-colors"
+                disabled={pending || saving}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-xl transition-colors disabled:opacity-50"
               >
-                <RotateCcw className="w-3.5 h-3.5" /> Về 0
+                {pending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />} Về 0
               </button>
             ) : (
               <span />
@@ -136,16 +147,19 @@ export default function PaymentModal({ isOpen, onClose, calc, onConfirm }) {
               <button
                 type="button"
                 onClick={onClose}
-                className="px-3.5 py-1.5 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
+                disabled={pending}
+                className="px-3.5 py-1.5 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
               >
                 Hủy
               </button>
               <button
                 type="button"
                 onClick={handleConfirm}
-                className="px-5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-sm transition-colors"
+                disabled={pending || saving}
+                className="flex items-center gap-1.5 px-5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-sm transition-colors disabled:opacity-50"
               >
-                Thu thêm
+                {pending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {pending ? 'Đang ghi…' : 'Thu thêm'}
               </button>
             </div>
           </div>

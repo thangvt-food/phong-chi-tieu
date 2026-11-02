@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   X,
   Zap,
@@ -12,6 +12,7 @@ import {
   Users,
   Split,
   Plus,
+  Loader2,
 } from 'lucide-react';
 import {
   formatMoney,
@@ -36,10 +37,13 @@ export default function ExpenseModal({
   onSave,
   members = [],
   editingExpense = null,
+  saving = false,
 }) {
   // NOTE: Mọi hook phải chạy trước mọi `return` (Rules of Hooks).
   // Không được `return null` ở đây — xem cuối hàm, sau useMemo.
   const todayStr = new Date().toISOString().split('T')[0];
+
+  const [pending, setPending] = useState(false);
 
   const [category, setCategory] = useState('dien');
   const [expenseDate, setExpenseDate] = useState(todayStr);
@@ -57,7 +61,13 @@ export default function ExpenseModal({
   const [splitMemberIds, setSplitMemberIds] = useState([]);
   const [fixedEntries, setFixedEntries] = useState([{ member_id: '', amount: '' }]);
 
+  // Modal giờ sống qua cả lệnh ghi + loadRoom, members sẽ đổi identity giữa chừng.
+  // Effet nạp form chỉ được chạy theo editingExpense/isOpen, nên đọc members qua ref.
+  const membersRef = useRef(members);
+  membersRef.current = members;
+
   useEffect(() => {
+    const members = membersRef.current;
     if (editingExpense) {
       setCategory(editingExpense.category || 'khac');
       setExpenseDate(editingExpense.expense_date || todayStr);
@@ -95,7 +105,7 @@ export default function ExpenseModal({
       setSplitMemberIds(members.map((m) => m.id));
       setFixedEntries([{ member_id: members[0]?.id || '', amount: '' }]);
     }
-  }, [editingExpense, isOpen, members]);
+  }, [editingExpense, isOpen]);
 
   const handleSelectPreset = (catKey) => {
     setCategory(catKey);
@@ -177,8 +187,9 @@ export default function ExpenseModal({
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    if (pending) return;
     const finalAmount = parseInt(amount) || 0;
     if (finalAmount <= 0) {
       alert('Vui lòng nhập số tiền hợp lệ!');
@@ -215,20 +226,25 @@ export default function ExpenseModal({
       }
     }
 
-    onSave({
-      id: editingExpense?.id,
-      category,
-      expense_date: expenseDate,
-      period_id: `${year}-${month}`,
-      title: title.trim() || 'Khoản chi',
-      amount: finalAmount,
-      note: note.trim(),
-      target_member_id: category === 'rieng' ? targetMemberId : null,
-      quantity: category === 'nuoc_uong' ? parseInt(bottlesCount) : null,
-      unit_price: category === 'nuoc_uong' ? parseInt(bottlePrice) : null,
-      split_config,
-    });
-    onClose();
+    setPending(true);
+    try {
+      const res = await onSave({
+        id: editingExpense?.id,
+        category,
+        expense_date: expenseDate,
+        period_id: `${year}-${month}`,
+        title: title.trim() || 'Khoản chi',
+        amount: finalAmount,
+        note: note.trim(),
+        target_member_id: category === 'rieng' ? targetMemberId : null,
+        quantity: category === 'nuoc_uong' ? parseInt(bottlesCount) : null,
+        unit_price: category === 'nuoc_uong' ? parseInt(bottlePrice) : null,
+        split_config,
+      });
+      if (res?.success) onClose();
+    } finally {
+      setPending(false);
+    }
   };
 
   return (
@@ -241,7 +257,8 @@ export default function ExpenseModal({
           </span>
           <button
             onClick={onClose}
-            className="p-1 rounded-full text-slate-400 hover:text-white transition-colors"
+            disabled={pending}
+            className="p-1 rounded-full text-slate-400 hover:text-white transition-colors disabled:opacity-50"
           >
             <X className="w-4 h-4" />
           </button>
@@ -651,15 +668,24 @@ export default function ExpenseModal({
             <button
               type="button"
               onClick={onClose}
-              className="px-3.5 py-1.5 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
+              disabled={pending}
+              className="px-3.5 py-1.5 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors disabled:opacity-50"
             >
               Hủy
             </button>
             <button
               type="submit"
-              className="px-5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-sm transition-colors"
+              disabled={pending || saving}
+              className="flex items-center gap-1.5 px-5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-sm transition-colors disabled:opacity-50"
             >
-              {editingExpense ? 'Lưu' : 'Thêm'}
+              {pending ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Đang lưu…
+                </>
+              ) : (
+                editingExpense ? 'Lưu' : 'Thêm'
+              )}
             </button>
           </div>
         </form>

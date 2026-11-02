@@ -9,6 +9,7 @@ import {
   AlertCircle,
   X,
   History,
+  Loader2,
 } from 'lucide-react';
 import { formatMoney } from '../services/api';
 import confetti from 'canvas-confetti';
@@ -24,10 +25,12 @@ export default function MemberCardList({
   onRecordPayment,
   onSelectMember,
   onOpenLogs,
+  saving = false,
 }) {
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [confirmInput, setConfirmInput] = useState('');
   const [confirmError, setConfirmError] = useState('');
+  const [busyId, setBusyId] = useState('');
 
   const requestToggle = (calc) => {
     const { member, totalAmount, paidAmount = 0, isPaid, isPartial } = calc;
@@ -46,7 +49,7 @@ export default function MemberCardList({
     setConfirmError('');
   };
 
-  const handleConfirmSubmit = (e) => {
+  const handleConfirmSubmit = async (e) => {
     e.preventDefault();
     if (!confirmDialog) return;
     const num = parseInt(confirmInput.replace(/\D/g, ''), 10) || 0;
@@ -56,15 +59,23 @@ export default function MemberCardList({
     }
 
     const nextPaid = !confirmDialog.currentPaid;
-    onTogglePaid(periodId, confirmDialog.memberId, nextPaid, nextPaid ? confirmDialog.totalAmount : 0);
-    if (nextPaid) {
-      confetti({
-        particleCount: 40,
-        spread: 60,
-        origin: { y: 0.8 },
-      });
+    const { memberId, totalAmount } = confirmDialog;
+    setBusyId(memberId);
+    try {
+      const res = await onTogglePaid(periodId, memberId, nextPaid, nextPaid ? totalAmount : 0);
+      if (res?.success) {
+        if (nextPaid) {
+          confetti({
+            particleCount: 40,
+            spread: 60,
+            origin: { y: 0.8 },
+          });
+        }
+        setConfirmDialog(null);
+      }
+    } finally {
+      setBusyId('');
     }
-    setConfirmDialog(null);
   };
 
   const handleToggle = (memberId, totalAmount, currentPaid) => {
@@ -185,7 +196,8 @@ export default function MemberCardList({
                   <>
                 <button
                   onClick={() => requestToggle(calc)}
-                  className={`p-1.5 rounded-xl transition-all ${
+                  disabled={saving}
+                  className={`p-1.5 rounded-xl transition-all disabled:opacity-50 ${
                     isPaid
                       ? 'text-emerald-600 bg-emerald-100/70 hover:bg-emerald-200'
                       : isPartial
@@ -212,7 +224,8 @@ export default function MemberCardList({
                 {/* Record Partial Payment Button */}
                 <button
                   onClick={() => onRecordPayment && onRecordPayment(calc)}
-                  className="p-1.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 transition-all active:scale-95"
+                  disabled={saving}
+                  className="p-1.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 transition-all active:scale-95 disabled:opacity-50"
                   title="Ghi nhận thu từng phần"
                 >
                   <HandCoins className="w-4 h-4 stroke-[2.5]" />
@@ -236,7 +249,7 @@ export default function MemberCardList({
       {confirmDialog && (
         <div 
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn"
-          onClick={() => setConfirmDialog(null)}
+          onClick={() => { if (busyId === '') setConfirmDialog(null); }}
         >
           <div 
             className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl border border-slate-100 p-5 space-y-4"
@@ -258,7 +271,8 @@ export default function MemberCardList({
               </div>
               <button
                 onClick={() => setConfirmDialog(null)}
-                className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                disabled={busyId !== ''}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 disabled:opacity-50"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -307,19 +321,28 @@ export default function MemberCardList({
                 <button
                   type="button"
                   onClick={() => setConfirmDialog(null)}
-                  className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                  disabled={busyId !== ''}
+                  className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl disabled:opacity-50"
                 >
                   Hủy
                 </button>
                 <button
                   type="submit"
-                  className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors ${
+                  disabled={busyId === confirmDialog.memberId || saving}
+                  className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors disabled:opacity-50 ${
                     confirmDialog.isCancelPaid
                       ? "bg-rose-600 hover:bg-rose-700"
                       : "bg-emerald-600 hover:bg-emerald-700"
                   }`}
                 >
-                  {confirmDialog.isCancelPaid ? "Xác nhận hủy nộp" : "Xác nhận xóa nợ"}
+                  {busyId === confirmDialog.memberId ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Đang lưu…
+                    </>
+                  ) : (
+                    confirmDialog.isCancelPaid ? "Xác nhận hủy nộp" : "Xác nhận xóa nợ"
+                  )}
                 </button>
               </div>
             </form>

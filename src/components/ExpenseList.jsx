@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Home,
   Zap,
@@ -10,6 +10,7 @@ import {
   Plus,
   Edit2,
   Receipt,
+  Loader2,
 } from 'lucide-react';
 import { formatMoney, describeSplit, parseSplitConfig } from '../services/api';
 import { EXPENSE_CATEGORIES } from '../constants/banks';
@@ -28,10 +29,12 @@ export default function ExpenseList({
   expenses = [],
   members = [],
   canManage = false,
+  saving = false,
   onAddExpense,
   onEditExpense,
   onDeleteExpense,
 }) {
+  const [busyId, setBusyId] = useState('');
   return (
     <div className="bg-white rounded-2xl p-3 border border-slate-200/90 shadow-sm space-y-2">
       {/* Header */}
@@ -122,17 +125,30 @@ export default function ExpenseList({
 
                   <button
                     onClick={() => onEditExpense(exp)}
-                    className={`p-1 text-slate-400 hover:text-indigo-600 transition-colors ${canManage ? '' : 'hidden'}`}
+                    disabled={saving}
+                    className={`p-1 text-slate-400 hover:text-indigo-600 transition-colors disabled:opacity-50 ${canManage ? '' : 'hidden'}`}
                     title="Sửa"
                   >
                     <Edit2 className="w-3.5 h-3.5" />
                   </button>
                   <button
-                    onClick={() => onDeleteExpense(exp.id)}
-                    className={`p-1 text-slate-400 hover:text-rose-600 transition-colors ${canManage ? '' : 'hidden'}`}
+                    onClick={async () => {
+                      setBusyId(exp.id);
+                      try {
+                        await onDeleteExpense(exp.id);
+                      } finally {
+                        setBusyId('');
+                      }
+                    }}
+                    disabled={saving || busyId !== ''}
+                    className={`p-1 text-slate-400 hover:text-rose-600 transition-colors disabled:opacity-50 ${canManage ? '' : 'hidden'}`}
                     title="Xóa"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    {busyId === exp.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
                   </button>
                 </div>
               </div>

@@ -14,6 +14,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { createRoom, claimInvite, searchRooms, requestJoinRoom } from '../services/api';
+import { useBusyGuard } from '../hooks/useBusyGuard';
 
 function extractToken(raw) {
   const s = (raw || '').trim();
@@ -40,7 +41,7 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
   const [ownerName, setOwnerName] = useState('');
 
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
+  const { run: runAction, isBusy, busy } = useBusyGuard();
 
   useEffect(() => {
     setTab(initialTab);
@@ -67,41 +68,42 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
     }
   };
 
-  const handleRequestJoin = async (targetRoomId) => {
-    setBusy(true);
-    setError('');
-    const res = await requestJoinRoom(targetRoomId);
-    setBusy(false);
-    if (!res.success) {
-      setError(res.error || 'Không gửi được yêu cầu.');
-      return;
-    }
-    setRequestedRooms((prev) => new Set([...prev, targetRoomId]));
-    if (res.is_joined) {
-      onEnter(targetRoomId);
-    }
-  };
+  const handleRequestJoin = (targetRoomId) =>
+    runAction(`join:${targetRoomId}`, async () => {
+      setError('');
+      const res = await requestJoinRoom(targetRoomId);
+      if (!res.success) {
+        setError(res.error || 'Không gửi được yêu cầu.');
+        return res;
+      }
+      setRequestedRooms((prev) => new Set([...prev, targetRoomId]));
+      if (res.is_joined) {
+        onEnter(targetRoomId);
+      }
+      return res;
+    });
 
-  const handleJoin = async (e) => {
+  const handleJoin = (e) => {
     e.preventDefault();
     const token = extractToken(link);
     if (token.length < 40) {
       setError('Dán link mời đầy đủ (có phần ?j=...) hoặc mã token.');
       return;
     }
-    setBusy(true);
-    setError('');
-    const result = await claimInvite(token);
-    setBusy(false);
-    if (!result.success) {
-      setError(result.error || 'Link mời không còn hợp lệ.');
-      return;
-    }
-    setLink('');
-    onEnter(result.room_id, { pending: !!result.pending });
+    return runAction('claim', async () => {
+      setError('');
+      const result = await claimInvite(token);
+      if (!result.success) {
+        setError(result.error || 'Link mời không còn hợp lệ.');
+        return result;
+      }
+      setLink('');
+      onEnter(result.room_id, { pending: !!result.pending });
+      return result;
+    });
   };
 
-  const handleCreate = async (e) => {
+  const handleCreate = (e) => {
     e.preventDefault();
     if (name.trim().length < 2) {
       setError('Tên phòng cần ít nhất 2 ký tự.');
@@ -111,18 +113,19 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
       setError('Mã khôi phục cần 6–12 chữ số.');
       return;
     }
-    setBusy(true);
-    setError('');
-    const result = await createRoom({ name: name.trim(), pin, ownerName: ownerName.trim() });
-    setBusy(false);
-    if (!result.success) {
-      setError(result.error || 'Không tạo được phòng.');
-      return;
-    }
-    setName('');
-    setPin('');
-    setOwnerName('');
-    onEnter(result.room_id);
+    return runAction('create', async () => {
+      setError('');
+      const result = await createRoom({ name: name.trim(), pin, ownerName: ownerName.trim() });
+      if (!result.success) {
+        setError(result.error || 'Không tạo được phòng.');
+        return result;
+      }
+      setName('');
+      setPin('');
+      setOwnerName('');
+      onEnter(result.room_id);
+      return result;
+    });
   };
 
   const inputClass =
@@ -258,9 +261,17 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
                           <button
                             onClick={() => handleRequestJoin(room.room_id)}
                             disabled={busy}
-                            className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5"
+                            className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-sm transition-colors flex items-center gap-1.5 disabled:opacity-50"
                           >
-                            <Send className="w-3.5 h-3.5" /> Xin vào
+                            {isBusy(`join:${room.room_id}`) ? (
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Đang gửi…
+                              </>
+                            ) : (
+                              <>
+                                <Send className="w-3.5 h-3.5" /> Xin vào
+                              </>
+                            )}
                           </button>
                         )}
                       </div>
@@ -300,8 +311,8 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
                   disabled={busy}
                   className="px-5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-sm transition-colors disabled:opacity-50 flex items-center gap-1.5"
                 >
-                  {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  {busy ? 'Đang nhận...' : 'Nhận phòng'}
+                  {isBusy('claim') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {isBusy('claim') ? 'Đang nhận...' : 'Nhận phòng'}
                 </button>
               </div>
             </form>
@@ -363,8 +374,8 @@ export default function AddRoomModal({ isOpen, onClose, initialTab = 'search', o
                   disabled={busy}
                   className="px-5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-sm transition-colors disabled:opacity-50 flex items-center gap-1.5"
                 >
-                  {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                  {busy ? 'Đang tạo...' : 'Tạo phòng'}
+                  {isBusy('create') ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                  {isBusy('create') ? 'Đang tạo...' : 'Tạo phòng'}
                 </button>
               </div>
             </form>

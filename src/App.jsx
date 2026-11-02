@@ -31,6 +31,7 @@ import {
   calculatePeriodDebts,
 } from './services/api';
 import { roleRank } from './constants/roles';
+import { useBusyGuard } from './hooks/useBusyGuard';
 
 export default function App() {
   const booted = useRef(false);
@@ -45,6 +46,8 @@ export default function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selectedPeriodId, setSelectedPeriodId] = useState('');
+
+  const { run: runWrite, isBusy: isWriteBusy, busy: saving } = useBusyGuard();
 
   const [roomHint] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('p') || getLastRoomId();
@@ -253,17 +256,19 @@ export default function App() {
 
   // ---- Điều hướng phòng ----
 
-  const switchRoom = async (next) => {
+  const switchRoom = (next) => {
     if (!next) return;
     if (next === roomId && data && data.source !== 'need_room' && data.source !== 'forbidden') return;
-    setIsAdminDashboardOpen(false);
-    setRoomId(next);
-    const url = new URL(window.location.href);
-    url.searchParams.set('p', next);
-    window.history.pushState({}, '', url.toString());
-    setData(null);
-    setSelectedPeriodId('');
-    await loadRoom(next, { spinner: true });
+    return runWrite(`room:switch:${next}`, async () => {
+      setIsAdminDashboardOpen(false);
+      setRoomId(next);
+      const url = new URL(window.location.href);
+      url.searchParams.set('p', next);
+      window.history.pushState({}, '', url.toString());
+      setData(null);
+      setSelectedPeriodId('');
+      await loadRoom(next, { spinner: true });
+    });
   };
 
   const handleAuthed = async ({ claimedRoomId } = {}) => {
@@ -310,19 +315,20 @@ export default function App() {
     window.history.replaceState({}, '', url.toString());
   };
 
-  const handleLogout = async () => {
-    try {
-      await authLogout();
-    } finally {
-      setAuth(null);
-      setMyRooms([]);
-      setPendingRequests([]);
-      setData(null);
-      setSelectedPeriodId('');
-      setRoomId('');
-      setIsAdminDashboardOpen(false);
-    }
-  };
+  const handleLogout = () =>
+    runWrite('auth:logout', async () => {
+      try {
+        await authLogout();
+      } finally {
+        setAuth(null);
+        setMyRooms([]);
+        setPendingRequests([]);
+        setData(null);
+        setSelectedPeriodId('');
+        setRoomId('');
+        setIsAdminDashboardOpen(false);
+      }
+    });
 
   const handleLeaveRoom = async () => {
     if (!me) return;
@@ -338,86 +344,97 @@ export default function App() {
         'Muốn vào lại thì cần chủ phòng gửi link mời mới.'
     )) return;
 
-    const result = await leaveRoom(roomId);
-    if (!result.success) {
-      alert(result.error || 'Không rời phòng được.');
-      return;
-    }
-    const fresh = await authMe();
-    const rooms = fresh.rooms || [];
-    setMyRooms(rooms);
-    if (fresh.user) setAuth(fresh.user);
-    const next = rooms[0]?.room_id || '';
-    if (next) {
-      await switchRoom(next);
-    } else {
-      setRoomId('');
-      setData(null);
-      setSelectedPeriodId('');
-      clearRoomFromUrl();
-    }
+    return runWrite('room:leave', async () => {
+      const result = await leaveRoom(roomId);
+      if (!result.success) {
+        alert(result.error || 'Không rời phòng được.');
+        return result;
+      }
+      const fresh = await authMe();
+      const rooms = fresh.rooms || [];
+      setMyRooms(rooms);
+      if (fresh.user) setAuth(fresh.user);
+      const next = rooms[0]?.room_id || '';
+      if (next) {
+        await switchRoom(next);
+      } else {
+        setRoomId('');
+        setData(null);
+        setSelectedPeriodId('');
+        clearRoomFromUrl();
+      }
+      return result;
+    });
   };
 
   // ---- Ghi sổ ----
 
-  const handleSaveExpense = async (expense) => {
-    const result = await saveExpense(roomId, expense);
-    if (!result.success) {
-      if (result.unauthorized) {
-        alert('Phiên đã hết hạn, đăng nhập lại.');
-        await refreshMe();
-        return;
+  const handleSaveExpense = (expense) =>
+    runWrite('expense:save', async () => {
+      const result = await saveExpense(roomId, expense);
+      if (!result.success) {
+        if (result.unauthorized) {
+          alert('Phiên đã hết hạn, đăng nhập lại.');
+          await refreshMe();
+          return result;
+        }
+        alert(result.error || 'Không thể lưu khoản chi!');
+        return result;
       }
-      alert(result.error || 'Không thể lưu khoản chi!');
-      return;
-    }
-    if (result.period_id) setSelectedPeriodId(result.period_id);
-    await loadRoom(roomId);
-  };
+      if (result.period_id) setSelectedPeriodId(result.period_id);
+      await loadRoom(roomId);
+      return result;
+    });
 
   const handleDeleteExpense = async (id) => {
-    if (!confirm('Xóa khoản chi này?')) return;
-    const result = await deleteExpense(roomId, id);
-    if (!result.success) {
-      if (result.unauthorized) {
-        alert('Phiên đã hết hạn, đăng nhập lại.');
-        await refreshMe();
-        return;
+    if (!confirm('Xóa khoản chi này?')) return { success: false, blocked: true };
+    return runWrite(`expense:delete:${id}`, async () => {
+      const result = await deleteExpense(roomId, id);
+      if (!result.success) {
+        if (result.unauthorized) {
+          alert('Phiên đã hết hạn, đăng nhập lại.');
+          await refreshMe();
+          return result;
+        }
+        alert(result.error || 'Không xóa được khoản chi.');
+        return result;
       }
-      alert(result.error || 'Không xóa được khoản chi.');
-      return;
-    }
-    await loadRoom(roomId);
+      await loadRoom(roomId);
+      return result;
+    });
   };
 
   const handleTogglePaid = async (periodId, memberId, nextPaid, paidAmount) => {
-    if (!me || isOffline) return;
+    if (!me || isOffline) return { success: false, blocked: true };
     const targetPeriod = periodId || activePeriod?.id;
     if (!targetPeriod) {
       alert('Phòng chưa có kỳ nào. Hãy tạo kỳ hoặc thêm khoản chi trước.');
-      return;
+      return { success: false, blocked: true };
     }
     const isSelf = me.member_id === memberId;
-    if (isSelf ? !canTickSelf : !canManage) return;
+    if (isSelf ? !canTickSelf : !canManage) return { success: false, blocked: true };
 
-    const result = isSelf
-      ? await memberTogglePaid(roomId, {
-          period_id: targetPeriod,
-          is_paid: nextPaid,
-          paid_amount: paidAmount,
-        })
-      : await toggleSharePaid(roomId, targetPeriod, memberId, nextPaid, paidAmount);
+    return runWrite(`share:${memberId}`, async () => {
+      const result = isSelf
+        ? await memberTogglePaid(roomId, {
+            period_id: targetPeriod,
+            is_paid: nextPaid,
+            paid_amount: paidAmount,
+          })
+        : await toggleSharePaid(roomId, targetPeriod, memberId, nextPaid, paidAmount);
 
-    if (!result.success) {
-      if (result.unauthorized) {
-        alert('Phiên đã hết hạn, đăng nhập lại.');
-        await refreshMe();
-        return;
+      if (!result.success) {
+        if (result.unauthorized) {
+          alert('Phiên đã hết hạn, đăng nhập lại.');
+          await refreshMe();
+          return result;
+        }
+        alert(result.error || 'Không lưu được!');
+        return result;
       }
-      alert(result.error || 'Không lưu được!');
-      return;
-    }
-    await loadRoom(roomId);
+      await loadRoom(roomId);
+      return result;
+    });
   };
 
   const handleRecordPayment = (calc) => {
@@ -426,16 +443,16 @@ export default function App() {
   };
 
   const handleConfirmPayment = async (newPaidTotal) => {
-    if (!paymentCalculation) return;
+    if (!paymentCalculation) return { success: false, blocked: true };
     const { member, totalAmount } = paymentCalculation;
     const isFull = newPaidTotal >= totalAmount && totalAmount > 0;
-    await handleTogglePaid(activePeriod?.id, member.id, isFull, newPaidTotal);
+    return handleTogglePaid(activePeriod?.id, member.id, isFull, newPaidTotal);
   };
 
   const handleDetailToggle = async (calc) => {
-    if (!calc) return;
+    if (!calc) return { success: false, blocked: true };
     const nextPaid = !calc.isPaid;
-    await handleTogglePaid(
+    return handleTogglePaid(
       activePeriod?.id,
       calc.member.id,
       nextPaid,
@@ -567,8 +584,10 @@ export default function App() {
               </button>
               <button
                 onClick={handleLogout}
-                className="text-[11px] font-semibold text-slate-400 hover:text-slate-600 pt-1"
+                disabled={saving}
+                className="text-[11px] font-semibold text-slate-400 hover:text-slate-600 pt-1 disabled:opacity-50 flex items-center justify-center gap-1.5 mx-auto"
               >
+                {isWriteBusy('auth:logout') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 Đăng xuất
               </button>
             </div>
@@ -605,9 +624,15 @@ export default function App() {
           <div className="flex flex-col gap-2">
             <button
               onClick={() => switchRoom(myRooms[0].room_id)}
-              className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-1.5"
+              disabled={saving}
+              className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
-              <Home className="w-4 h-4" /> Về phòng của tôi
+              {isWriteBusy(`room:switch:${myRooms[0].room_id}`) ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Home className="w-4 h-4" />
+              )}{' '}
+              Về phòng của tôi
             </button>
             <button
               onClick={() => {
@@ -672,6 +697,7 @@ export default function App() {
         currentRoomId={roomId}
         user={auth}
         canManage={canManage && !isOffline}
+        saving={saving}
         onSwitchRoom={switchRoom}
         onLeaveRoom={handleLeaveRoom}
         onOpenAddRoom={(tab) => {
@@ -720,6 +746,7 @@ export default function App() {
           myMemberId={me?.member_id || ''}
           canTickSelf={canTickSelf && !isOffline}
           canManageAll={canManage && !isOffline}
+          saving={saving}
           onOpenQr={handleOpenQr}
           onTogglePaid={handleTogglePaid}
           onRecordPayment={handleRecordPayment}
@@ -731,6 +758,7 @@ export default function App() {
           expenses={currentPeriodExpenses}
           members={data.members || []}
           canManage={canManage && !isOffline}
+          saving={saving}
           onAddExpense={() => {
             setEditingExpense(null);
             setIsExpenseModalOpen(true);
@@ -752,6 +780,7 @@ export default function App() {
         onSave={handleSaveExpense}
         members={activeMembers}
         editingExpense={editingExpense}
+        saving={saving}
       />
 
       <VietQrModal
@@ -771,6 +800,7 @@ export default function App() {
         }}
         calc={paymentCalculation}
         onConfirm={handleConfirmPayment}
+        saving={saving}
       />
 
       <MemberDetailModal
@@ -783,6 +813,7 @@ export default function App() {
         onOpenQr={handleOpenQr}
         onTogglePaid={handleDetailToggle}
         onRecordPayment={handleRecordPayment}
+        saving={saving}
       />
 
             <ActivityLogModal
@@ -830,10 +861,12 @@ export default function App() {
                   <button
                     key={r.room_id}
                     onClick={() => {
+                      if (saving) return;
                       setRoomPickerOpen(false);
-                      if (r.room_id !== roomId) handleSwitchRoom(r.room_id);
+                      if (r.room_id !== roomId) switchRoom(r.room_id);
                     }}
-                    className={`w-full p-3 rounded-2xl border text-left transition-all flex items-center justify-between gap-3 ${
+                    disabled={saving}
+                    className={`w-full p-3 rounded-2xl border text-left transition-all flex items-center justify-between gap-3 disabled:opacity-50 ${
                       isSelected
                         ? "bg-indigo-50 border-indigo-300 ring-2 ring-indigo-200"
                         : "bg-slate-50 border-slate-200 hover:bg-slate-100"
