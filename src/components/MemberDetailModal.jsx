@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   X,
   QrCode,
@@ -9,6 +9,7 @@ import {
   Users,
   UserCheck,
   EyeOff,
+  AlertCircle,
 } from 'lucide-react';
 import { formatMoney, describeSplit } from '../services/api';
 
@@ -45,6 +46,23 @@ export default function MemberDetailModal({
     isPartial,
     isPaid,
   } = calc;
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmInput, setConfirmInput] = useState('');
+  const [confirmError, setConfirmError] = useState('');
+
+  const targetAmount = isPaid ? paidAmount : (isPartial ? (totalAmount - paidAmount) : totalAmount);
+
+  const handleConfirmSubmit = (e) => {
+    e.preventDefault();
+    const num = parseInt(confirmInput.replace(/\D/g, ''), 10) || 0;
+    if (num !== targetAmount) {
+      setConfirmError(`Số tiền không khớp! Hãy nhập chính xác ${targetAmount.toLocaleString('vi-VN')}`);
+      return;
+    }
+    setConfirmOpen(false);
+    if (onTogglePaid) onTogglePaid(calc);
+  };
 
   const joinedIds = new Set(sharedItems.map((s) => s.expense.id));
   const skipped = (sharedExpenses || []).filter((e) => !joinedIds.has(e.id));
@@ -213,7 +231,7 @@ export default function MemberDetailModal({
         <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-1.5 shrink-0">
           {canAct ? (
             <button
-              onClick={() => onTogglePaid && onTogglePaid(calc)}
+              onClick={() => { setConfirmOpen(true); setConfirmInput(''); setConfirmError(''); }}
               className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-bold rounded-xl transition-all active:scale-95 ${
                 isPaid
                   ? 'text-emerald-700 bg-emerald-100 hover:bg-emerald-200'
@@ -253,6 +271,94 @@ export default function MemberDetailModal({
             </button>
           </div>
         </div>
+            {/* Modal xác nhận nhập số tiền */}
+      {confirmOpen && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn"
+          onClick={() => setConfirmOpen(false)}
+        >
+          <div 
+            className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl border border-slate-100 p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                  isPaid ? "bg-rose-100 text-rose-600" : "bg-emerald-100 text-emerald-600"
+                }`}>
+                  <AlertCircle className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm text-slate-900">
+                    {isPaid ? "Xác nhận hủy thanh toán" : "Xác nhận xóa hết nợ"}
+                  </h4>
+                  <p className="text-[11px] text-slate-500">{member.name}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setConfirmOpen(false)}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmSubmit} className="space-y-3">
+              <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
+                <p>{isPaid ? "Số tiền sẽ hủy về 0 ₫:" : "Số tiền nợ sẽ xóa trắng:"}</p>
+                <p className="text-base font-extrabold text-indigo-600">{formatMoney(targetAmount)}</p>
+                <p className="text-[10px] text-slate-400">
+                  Nhập chính xác số tiền trên để xác nhận thao tác.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Nhập số tiền xác nhận:
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoFocus
+                  value={confirmInput}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/\D/g, "");
+                    setConfirmInput(raw ? Number(raw).toLocaleString("vi-VN") : "");
+                    setConfirmError("");
+                  }}
+                  placeholder={String(targetAmount)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                />
+              </div>
+
+              {confirmError && (
+                <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{confirmError}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmOpen(false)}
+                  className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors ${
+                    isPaid ? "bg-rose-600 hover:bg-rose-700" : "bg-emerald-600 hover:bg-emerald-700"
+                  }`}
+                >
+                  {isPaid ? "Xác nhận hủy nộp" : "Xác nhận xóa nợ"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

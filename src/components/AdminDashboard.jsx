@@ -19,6 +19,7 @@ import {
   UserPlus,
   ShieldAlert,
   Crown,
+  QrCode,
 } from 'lucide-react';
 import { VIETNAM_BANKS } from '../constants/banks';
 import {
@@ -34,12 +35,16 @@ import {
   setMemberRole,
   unlinkMember,
   setRoomPin,
+  fetchJoinRequests,
+  reviewJoinRequest,
 } from '../services/api';
-import { INVITE_ROLES, ROLE_BADGE, ROLE_LABEL, roleRank } from '../constants/roles';
+import { ROLE_BADGE, ROLE_LABEL, roleRank } from '../constants/roles';
 
 export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDataRefresh, onAuthRefresh }) {
+  const isOwner = me?.role === 'owner';
   const [activeTab, setActiveTab] = useState('members');
   const [copiedLink, setCopiedLink] = useState(false);
+  const [showInviteQr, setShowInviteQr] = useState(false);
 
   const [memberForm, setMemberForm] = useState({ name: '', nickname: '', phone: '' });
   const [periodForm, setPeriodForm] = useState({ title: '', due_date: '' });
@@ -60,7 +65,9 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
   const [invite, setInvite] = useState(null);
   const [inviteBusy, setInviteBusy] = useState('');
   const [inviteError, setInviteError] = useState('');
-  const [inviteRole, setInviteRole] = useState('member');
+  const [joinRequests, setJoinRequests] = useState([]);
+  const [joinRequestsError, setJoinRequestsError] = useState('');
+  const [joinApprovalBusy, setJoinApprovalBusy] = useState(false);
 
   useEffect(() => {
     const s = data?.settings || {};
@@ -74,10 +81,26 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     });
   }, [roomId, data?.settings, data?.room_name]);
 
+  useEffect(() => {
+    if (!isOpen || !isOwner) return undefined;
+    let active = true;
+    fetchJoinRequests(roomId).then((result) => {
+      if (!active) return;
+      if (!result.success) {
+        setJoinRequestsError(result.error || 'Không tải được yêu cầu tham gia.');
+        return;
+      }
+      setJoinRequestsError('');
+      setJoinRequests(result.requests);
+    });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, isOwner, roomId]);
+
   if (!isOpen) return null;
 
   const myRank = roleRank(me?.role);
-  const isOwner = me?.role === 'owner';
   const canManage = myRank >= 3;
   if (!canManage) return null;
 
@@ -168,25 +191,48 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     await onAuthRefresh();
   };
 
-  const handleCreateInvite = async (member, role = inviteRole) => {
+  const handleCreateInvite = async (member) => {
     setInviteBusy(member.id);
     setInviteError('');
-    const result = await createInvite(roomId, member.id, { role });
+    const result = await createInvite(roomId, member.id);
     setInviteBusy('');
     if (!result.success) {
       setInvite(null);
       setInviteError(result.error || 'Không tạo được link mời.');
       return;
     }
-    setInviteRole(result.role || role);
     const base = window.location.origin + window.location.pathname;
     setInvite({
       member_id: member.id,
       memberName: member.nickname || member.name,
-      role: result.role || role,
+      role: result.role || 'member',
       link: `${base}?j=${result.token}`,
       expires_at: result.expires_at,
     });
+  };
+
+  const handleReviewJoinRequest = async (request, decision) => {
+    const result = await reviewJoinRequest(roomId, request.id, decision);
+    if (!result.success) {
+      alert(result.error || 'Không xử lý được yêu cầu tham gia.');
+      return;
+    }
+    const refreshed = await fetchJoinRequests(roomId);
+    if (refreshed.success) setJoinRequests(refreshed.requests);
+    else setJoinRequestsError(refreshed.error || 'Không tải được yêu cầu tham gia.');
+    if (decision === 'approve') await onDataRefresh();
+  };
+
+  const handleToggleJoinApproval = async () => {
+    setJoinApprovalBusy(true);
+    const next = data?.settings?.join_approval === '0' ? '1' : '0';
+    const result = await updateSettings(roomId, { join_approval: next });
+    setJoinApprovalBusy(false);
+    if (!result.success) {
+      alert(result.error || 'Không đổi được chế độ duyệt thành viên.');
+      return;
+    }
+    await onDataRefresh();
   };
 
   const handleSavePeriod = async (e) => {
@@ -242,7 +288,7 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
     setTimeout(() => setPinSuccess(''), 5000);
   };
 
-  const inviteRoleOptions = isOwner ? INVITE_ROLES : INVITE_ROLES.filter((r) => r.id !== 'manager');
+  const requiresJoinApproval = data?.settings?.join_approval !== '0';
 
   const tabClass = (key) =>
     `px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors ${
@@ -296,6 +342,69 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
         <div className="p-5 overflow-y-auto space-y-4">
           {activeTab === 'members' && (
             <div className="space-y-4">
+              {isOwner && (
+                <section className="p-4 bg-amber-50 rounded-2xl border border-amber-200 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h4 className="text-xs font-bold text-amber-900">
+                        Duyệt thành viên ({joinRequests.length})
+                      </h4>
+                      <p className="text-[11px] text-amber-800 mt-1">
+                        {requiresJoinApproval
+                          ? 'Link mời cần chủ phòng duyệt trước khi tài khoản vào sổ.'
+                          : 'Link mời được nhận ngay, không cần duyệt.'}
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleToggleJoinApproval}
+                      disabled={joinApprovalBusy}
+                      className="shrink-0 px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-[10px] font-bold text-amber-900 disabled:opacity-50"
+                    >
+                      {joinApprovalBusy
+                        ? 'Đang lưu...'
+                        : requiresJoinApproval
+                          ? 'Tắt duyệt'
+                          : 'Bật duyệt'}
+                    </button>
+                  </div>
+                  {joinRequestsError && (
+                    <p className="text-xs text-rose-700">{joinRequestsError}</p>
+                  )}
+                  {joinRequests.map((request) => (
+                    <div
+                      key={request.id}
+                      className="p-3 bg-white rounded-xl border border-amber-200 flex flex-wrap items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-slate-800">
+                          {request.display_name || request.email} muốn vào hồ sơ {request.member_name}
+                        </p>
+                        <p className="text-[10px] text-slate-500 truncate">
+                          {request.email} · quyền ban đầu: {ROLE_LABEL[request.role] || request.role}
+                        </p>
+                      </div>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => handleReviewJoinRequest(request, 'approve')}
+                          className="px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white text-[10px] font-bold"
+                        >
+                          Duyệt
+                        </button>
+                        <button
+                          onClick={() => handleReviewJoinRequest(request, 'reject')}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-[10px] font-bold"
+                        >
+                          Từ chối
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {!joinRequests.length && !joinRequestsError && (
+                    <p className="text-[11px] text-amber-800">Chưa có yêu cầu nào chờ duyệt.</p>
+                  )}
+                </section>
+              )}
+
               <form onSubmit={handleSaveMember} className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
                 <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
                   <UserPlus className="w-3.5 h-3.5" /> Thêm người vào sổ
@@ -331,7 +440,8 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                 </div>
                 <p className="text-[10px] text-slate-500">
                   Người mới chỉ vào được sổ khi có tài khoản: sau khi thêm, bấm "Tạo link" ở dòng
-                  của họ và gửi link qua Zalo/SMS.
+                  của họ và gửi link qua Zalo/SMS. Link có quyền Thành viên; chủ phòng có thể đổi quyền
+                  sau khi duyệt.
                 </p>
                 <div className="flex justify-end">
                   <button
@@ -362,28 +472,8 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           })}
                         </span>
                       </div>
-                      <div className="flex flex-wrap gap-1">
-                        {inviteRoleOptions.map((r) => (
-                          <button
-                            key={r.id}
-                            onClick={() => {
-                              if (r.id === inviteRole) return;
-                              setInviteRole(r.id);
-                              handleCreateInvite({ id: invite.member_id, name: invite.memberName }, r.id);
-                            }}
-                            title={r.desc}
-                            className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors ${
-                              inviteRole === r.id
-                                ? 'bg-indigo-600 text-white border-indigo-600'
-                                : 'bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-100'
-                            }`}
-                          >
-                            {r.label}
-                          </button>
-                        ))}
-                      </div>
                       <p className="text-[10px] text-indigo-800">
-                        {INVITE_ROLES.find((r) => r.id === inviteRole)?.desc}
+                        Link cấp quyền Thành viên. Sau khi nhận/duyệt, chủ phòng đổi quyền trong danh sách thành viên.
                       </p>
                       <div className="flex items-center gap-2">
                         <input
@@ -392,6 +482,18 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           onFocus={(e) => e.target.select()}
                           className="flex-1 px-2.5 py-2 bg-white border border-indigo-200 rounded-lg text-[11px] font-mono text-slate-700 outline-none"
                         />
+                        <button
+                          type="button"
+                          onClick={() => setShowInviteQr((v) => !v)}
+                          className={`p-2 border rounded-lg shrink-0 transition-colors ${
+                            showInviteQr
+                              ? "bg-indigo-600 text-white border-indigo-600"
+                              : "text-slate-600 hover:text-indigo-600 bg-white border-indigo-200"
+                          }`}
+                          title="Xem mã QR"
+                        >
+                          <QrCode className="w-4 h-4" />
+                        </button>
                         <button
                           onClick={() => {
                             navigator.clipboard.writeText(invite.link);
@@ -408,9 +510,24 @@ export default function AdminDashboard({ isOpen, onClose, roomId, data, me, onDa
                           className="px-2.5 py-2 text-[11px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded-lg shrink-0 hover:bg-indigo-100"
                           title="Hủy link cũ và tạo link mới"
                         >
-                          Tạo lại
+                          Tạo mã mới
                         </button>
                       </div>
+
+                      {showInviteQr && (
+                        <div className="p-3 bg-white rounded-xl border border-indigo-100 flex flex-col items-center text-center space-y-2">
+                          <p className="text-[11px] font-bold text-slate-700">Quét mã QR để nhận quyền vào phòng</p>
+                          <div className="p-2 bg-white rounded-xl border border-slate-200 shadow-sm inline-block">
+                            <img
+                              src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(invite.link)}`}
+                              alt="QR Code Link Mời"
+                              className="w-40 h-40 object-contain"
+                              loading="lazy"
+                            />
+                          </div>
+                          <p className="text-[10px] text-slate-400">Đưa camera điện thoại quét để mở trực tiếp</p>
+                        </div>
+                      )}
                       <p className="text-[10px] text-indigo-700">
                         Link chỉ dùng được một lần và chỉ nhận cho đúng người này.
                       </p>

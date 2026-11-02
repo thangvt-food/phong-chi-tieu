@@ -21,33 +21,35 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
        trước tên người để một tài khoản nhận cho nhiều phòng vẫn phân biệt được sao kê.
    - Hỗ trợ nút sao chép 1 chạm cho STK, Số tiền, Nội dung.
 
-3. **Bảo mật Admin theo từng phòng (không đăng ký/đăng nhập)**:
-   - Mỗi phòng có một mã PIN riêng; hệ thống băm **SHA-256** và so với hash lưu trong DB của phòng đó.
-   - PIN chỉ dùng để lấy "hash mở khoá" lưu trong máy bạn; tab **PIN & Mời người** cho đổi PIN.
-   - `schema.sql` seed hash của `123456` **cho D1 local**. DB thật phải đổi PIN ngay sau khi migrate.
+3. **Một tài khoản, quyền riêng theo từng phòng**:
+   - Đăng nhập bằng Google một lần; tài khoản được tạo tự động ở lần đăng nhập đầu và có thể nhận lời mời vào nhiều phòng.
+   - Mỗi phòng có một hồ sơ thành viên và vai trò riêng cho tài khoản đó. Bạn có thể là chủ phòng này, manager hoặc member ở phòng khác.
+   - Chủ phòng là một thành viên riêng của từng phòng. Tạo thêm phòng sẽ tạo thêm hồ sơ chủ phòng; thành viên, khoản chi, cài đặt và PIN khôi phục không dùng chung giữa các phòng.
+   - `viewer` chỉ xem; `member` có thể tự cập nhật phần đã nộp; `manager` được ghi sổ và quản thành viên cấp thấp hơn; `owner` quản cả cài đặt phòng.
 
-4. **Vào phòng bằng link mời (hết hạn 15 phút, dùng 1 lần)**:
-   - Admin mở **Cài đặt -> Thành viên -> Link mời**, gửi link cho đúng một người.
-   - Người được mời mở link -> nhận phiên 90 ngày trên thiết bị đó, tự tick "đã nộp" cho
-     phần của mình mà không cần PIN.
-   - Admin thu hồi bất cứ lúc nào (**icon đá người**): request kế tiếp của người đó là 401.
-   - Chỉ mã SHA-256 của token được lưu; DB bị lộ cũng không còn phiên sống.
+4. **Mời thành viên vào đúng một phòng**:
+   - Chủ phòng mở **Cài đặt -> Thành viên -> Link mời**, chọn hồ sơ thành viên và vai trò ban đầu (`member` mặc định), rồi gửi link riêng.
+   - Người nhận đăng nhập Google rồi nhận lời mời. Link chỉ dùng một lần và mặc định hết hạn sau 7 ngày.
+   - Duyệt thành viên bật mặc định: link tạo yêu cầu chờ chủ phòng duyệt. Chủ phòng có thể tắt duyệt trong tab Thành viên; khi đó link được phát hành sẽ vào phòng ngay. Không thể tham gia chỉ bằng mã phòng.
+   - Lời mời gắn với một hồ sơ thành viên trong một phòng. Một tài khoản chỉ liên kết với tối đa một hồ sơ thành viên trong mỗi phòng; cùng tài khoản vẫn có thể nhận lời mời ở các phòng khác.
+   - Phiên tài khoản có hạn 90 ngày. Chủ phòng có thể thu hồi quyền của thành viên; request tiếp theo của họ sẽ bị từ chối.
 
 5. **1-Chạm cập nhật trạng thái thanh toán**:
    - Khi có bạn trong phòng chuyển khoản, Admin bấm toggle đổi trạng thái "Chưa nộp" -> "Đã nộp" (kèm hiệu ứng pháo hoa chúc mừng 🎉).
    - Hỗ trợ **trả góp từng phần**: bấm icon 💰 trên thẻ thành viên để ghi nhận số đã thu mỗi đợt, app tự tính còn thiếu và sinh QR đúng số còn lại.
 
-6. **Nhiều phòng trọ độc lập, tự tạo trong app**:
-   - Một D1 duy nhất, mọi bảng có `room_id`; phòng là một sổ chi tiêu riêng
-     (thành viên, kỳ, khoản chi, PIN, sao kê riêng).
+6. **Nhiều phòng trọ độc lập, một tài khoản quản lý**:
+   - Dữ liệu app lưu trong Firestore, trong collection gốc `phongthuchi`; mỗi hồ sơ mang mã loại dữ liệu và ID ổn định. Tài khoản dùng chung được nối vào từng phòng qua membership.
+   - Mỗi phòng là một sổ riêng (thành viên, kỳ, khoản chi, PIN, sao kê); tạo phòng mới không gộp hay chia sẻ dữ liệu với phòng hiện tại.
    - URL theo phòng: `https://.../?p=phong-2a`. Thiếu `?p` = phòng `phong-2a` (URL cũ không hỏng).
-   - Bấm tên phòng trên header -> **Tạo phòng mới** (mã phòng sinh từ tên, không dấu) hoặc
-     dán link mời để vào phòng người khác.
-   - Hai phòng cùng tạo kỳ `2026-11` không ghi đè nhau (PK ghép `(room_id, period_id, member_id)`).
+   - Bấm tên phòng trên header để xem danh sách **Phòng của bạn** và chuyển phòng mà không cần đăng xuất. Vai trò được kiểm tra riêng cho phòng đang chọn.
+   - **Tạo phòng mới** sẽ thêm phòng vào cùng tài khoản, với hồ sơ chủ phòng và PIN khôi phục riêng; **Nhận link mời** sẽ thêm membership vào phòng được mời.
+   - Khi mở app, phòng hợp lệ ghi trong `?p` được ưu tiên; nếu không có thì app khôi phục phòng dùng gần nhất trên thiết bị, rồi chọn phòng đầu tiên trong danh sách.
+   - Dữ liệu được khóa theo phòng và kỳ nên hai phòng cùng tạo kỳ `2026-11` không ghi đè nhau.
 
 7. **Hoạt động kép (Dual Mode)**:
-   - Chạy offline/local: Tự động lưu vào `LocalStorage`, mở web là chạy ngay không cần cài đặt database.
-   - Deploy Cloudflare: Tự động kết nối với **Cloudflare D1 SQL Database** qua **Cloudflare Pages Functions** (`/api/*`).
+   - Chạy với Cloudflare: dữ liệu và mọi thao tác ghi đi qua **Pages Functions** tới **Firestore**; trình duyệt không truy cập Firestore trực tiếp.
+   - Khi mất mạng, app chỉ đọc cache của phòng đã tải trước đó; thao tác ghi bị khóa cho tới khi kết nối lại.
 
 ---
 
@@ -64,30 +66,40 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    ```
    Mở trình duyệt tại: `http://localhost:3000`
 
-   > Chế độ này dùng frontend local + API production (qua proxy trong `vite.config.js`).
+   > Frontend local proxy `/api` sang server Functions local tại `localhost:8788`; chạy `npm run dev:server` hoặc `npm run dev:full` trước khi đăng nhập.
 
-3. Dev full-stack local (frontend + backend Functions + D1 riêng, không đụng production):
+3. Dev full-stack local (frontend + backend Functions):
    ```bash
-   npm run db:pull   # 1 lần: copy dữ liệu production về D1 local (chỉ đọc, an toàn)
-   npm run dev:full  # chạy web :3000 + server API local :8788 cùng lúc
+   # Tạo file .dev.vars (được gitignore) với FIRESTORE_SERVICE_ACCOUNT là JSON
+   # service account dùng cho môi trường dev và FIREBASE_PROJECT_ID=ant05-efa02.
+   npm run dev:full      # chạy web :3000 + server API local :8788 cùng lúc
    ```
-   Mở trình duyệt tại: `http://localhost:3000` (mọi `/api` lúc này đi vào server local).
+   Mở trình duyệt tại `http://localhost:3000`; mọi `/api` đi vào server local. Không dùng credential production trong máy chia sẻ hoặc môi trường không tin cậy.
 
    | Lệnh | Tác dụng |
    | ---- | -------- |
    | `npm run dev` | Web local, `/api` proxy sang server local (:8788) — không còn bắn thẳng production |
    | `VITE_API_TARGET=https://phong-chi-tieu.pages.dev npm run dev` | Chủ đích cho dev bắn lên production |
-   | `npm run dev:server` | Chỉ chạy server API local (:8788, D1 local) |
+   | `npm run dev:server` | Chỉ chạy server API local (:8788, cần `.dev.vars`) |
    | `npm run dev:full` | Web local + server API local cùng lúc |
-   | `npm run db:pull` | Copy dữ liệu production về D1 local |
-   | `npm run db:schema:local` | Dựng lại D1 local từ `schema.sql` (bản đã có `room_id`) |
-   | `npm run db:migrate:local` | Chạy `migrations/002_multitenancy.sql` trên D1 local |
-   | `bash scripts/smoke.sh` | 48 assertion đa phòng qua HTTP, chạy trên D1 local (cần `dev:server`) |
-   | `bash scripts/pr6-deploy.sh` | Migration D1 lên production (backup → migrate → deploy → verify). Không có `--yes` thì chỉ in lệnh. Mặc định chạy `migrations/003_invite_roles.sql` → version 3; đổi bằng `MIGRATION=… TO_VERSION=…` |
+   | `npm test` | Chạy unit tests xác minh Google token và Firestore REST client |
+   | `npm run db:firestore:dry-run` | Đọc D1 production, chỉ in số lượng bản ghi; không ghi Firestore |
+   | `npm run db:firestore:copy` | Sao chép D1 production vào Firestore; chỉ chạy một lần sau khi xem dry-run |
+   | `npm run db:pull` | Công cụ legacy để lấy bản D1 dự phòng về local |
+   | `bash scripts/smoke.sh` | Smoke test legacy cho backend D1 cũ; không dùng để xác nhận API Firestore |
+
+   Dữ liệu hiện tại đã được sao chép vào collection `phongthuchi`. Script migration giữ nguyên D1; nếu lần chạy bị ngắt giữa chừng, chỉ tiếp tục bằng `node scripts/migrate-d1-to-firestore.mjs --apply --resume` sau khi xác nhận các document hiện có là của lần copy đó.
+
+   Nếu cần nâng D1 backup từ version 4 lên version 5, chỉ thao tác trên bản backup và không chạy lại để khởi động app:
+   ```bash
+   MIGRATION=migrations/005_google_auth_and_join_approval.sql TO_VERSION=5 bash scripts/pr6-deploy.sh
+   MIGRATION=migrations/005_google_auth_and_join_approval.sql TO_VERSION=5 bash scripts/pr6-deploy.sh --yes
+   ```
+   Lệnh đầu chỉ xem kế hoạch; lệnh thứ hai thay đổi D1 production. Không chạy nếu D1 đang ở version khác 4.
 
 ---
 
-## ☁️ Hướng Dẫn Deploy Lên Cloudflare Pages & Tạo D1 Database
+## ☁️ Deploy Cloudflare Pages và Firestore
 
 ### Cách 1: Deploy trực tiếp bằng Wrangler CLI
 
@@ -96,30 +108,27 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    npx wrangler login
    ```
 
-2. **Tạo Database Cloudflare D1**:
-   ```bash
-   npx wrangler d1 create phong_chi_tieu_db
-   ```
-   Lệnh trên sẽ in ra thông tin cấu hình, ví dụ:
-   ```toml
-   [[d1_databases]]
-   binding = "DB"
-   database_name = "phong_chi_tieu_db"
-   database_id = "xxxx-xxxx-xxxx-xxxx"
-   ```
-   👉 Hãy mở file [wrangler.toml](file:///data/Projects/2a/wrangler.toml) và dán `database_id` của bạn vào.
+2. **Tạo Firestore database** trong Firebase Console của project `ant05-efa02` (Firestore Native, region `asia-southeast1`). Collection gốc của ứng dụng là `phongthuchi`.
 
-3. **Khởi tạo bảng và dữ liệu mẫu vào Cloudflare D1**:
-   ```bash
-   npx wrangler d1 execute phong_chi_tieu_db --file=./schema.sql --remote
-   ```
+3. **Cấp quyền cho Cloudflare Pages**:
+   - Tạo service account runtime riêng với quyền `roles/datastore.user`.
+   - Lưu JSON key vào Pages project `phong-chi-tieu` dưới secret `FIRESTORE_SERVICE_ACCOUNT` bằng `npx wrangler pages secret put FIRESTORE_SERVICE_ACCOUNT --project-name=phong-chi-tieu`.
+   - Biến `FIREBASE_PROJECT_ID=ant05-efa02` đã khai báo trong [`wrangler.toml`](./wrangler.toml).
+   - Quyền Datastore User áp dụng cho toàn Firestore của project, không chỉ collection `phongthuchi`; giữ credential bí mật và không đưa vào Git.
 
-4. **Build dự án**:
+4. **Sao chép D1 hiện hữu (nếu chưa copy)**:
+   ```bash
+   npm run db:firestore:dry-run
+   npm run db:firestore:copy
+   ```
+   Cần đăng nhập `gcloud` và Wrangler đúng project/account. Script mặc định chỉ đọc; `--apply` mới ghi vào Firestore. D1 không bị xóa hay sửa.
+
+5. **Build dự án**:
    ```bash
    npm run build
    ```
 
-5. **Deploy lên Cloudflare Pages** (thiếu `--branch=production` là code chỉ lên Preview,
+6. **Deploy lên Cloudflare Pages** (thiếu `--branch=production` là code chỉ lên Preview,
    `phong-chi-tieu.pages.dev` vẫn chạy bản cũ):
    ```bash
    npx wrangler pages deploy dist --project-name=phong-chi-tieu --branch=production
@@ -127,7 +136,7 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
 
 ---
 
-### Cách 2: Deploy qua giao diện Cloudflare Dashboard (Khuyên dùng nếu liên kết GitHub)
+### Deploy qua giao diện Cloudflare Dashboard
 
 1. Đẩy code lên GitHub repository của bạn.
 2. Truy cập [dash.cloudflare.com](https://dash.cloudflare.com) -> **Workers & Pages** -> **Create application** -> **Pages** -> **Connect to Git**.
@@ -135,22 +144,20 @@ Webapp dành riêng cho việc quản lý và công khai chi phí phòng trọ/c
    - **Framework preset**: `Vite`
    - **Build command**: `npm run build`
    - **Build output directory**: `dist`
-4. Tạo D1 Database:
-   - Vào menu bên trái: **Storage & Databases** -> **D1** -> **Create database** đặt tên `phong_chi_tieu_db`.
-   - Vào mục **Console** của database đó, dán toàn bộ nội dung file [schema.sql](file:///data/Projects/2a/schema.sql) vào và ấn **Execute**.
-5. Liên kết D1 với Pages:
-   - Vào Pages project vừa tạo -> **Settings** -> **Functions** -> **D1 database bindings**.
-   - Bấm **Add binding**:
-     - Variable name: `DB`
-     - D1 database: chọn `phong_chi_tieu_db`
-6. Bấm **Redeploy** là ứng dụng đã online 100%!
+4. Tạo secret `FIRESTORE_SERVICE_ACCOUNT` trong Pages -> **Settings** -> **Variables and Secrets**.
+5. Đảm bảo Firestore database của Firebase project `ant05-efa02` đã tồn tại và `FIREBASE_PROJECT_ID` được đặt là `ant05-efa02`.
+6. Bấm **Redeploy** sau khi cập nhật secret.
 
 ---
 
-## 🔐 Cấu Trúc Mã Hash Admin
+## 🔐 Google Auth, duyệt thành viên và PIN phòng
 
-- Thuật toán băm: **SHA-256**, lưu theo phòng ở `settings(room_id, 'admin_pin_hash')`.
-- Nếu muốn hardcode mã PIN của riêng bạn (ví dụ PIN là `999888`):
-  1. Vào web -> bấm **Cài đặt** -> nhập PIN hiện tại của phòng đó
-  2. Mở tab **PIN & Mời người** -> nhập mã mới của bạn -> lưu.
-  3. Bạn có thể dán mã hash này vào dòng `admin_pin_hash` trong [schema.sql](file:///data/Projects/2a/schema.sql) hoặc file cấu hình Cloudflare D1.
+- Bật **Google** provider trong Firebase Authentication -> Sign-in method. Thêm các host cần dùng (localhost, Pages production và preview domain) vào Authorized domains.
+- Firebase project phải là `ant05-efa02`; `FIREBASE_PROJECT_ID` được cấu hình trong [`wrangler.toml`](./wrangler.toml).
+- Google xác thực danh tính; API xác minh Firebase ID token rồi tạo phiên ứng dụng opaque. Hồ sơ tài khoản, membership, vai trò, sổ chi tiêu, PIN và yêu cầu duyệt lưu trong collection Firestore `phongthuchi`. Firebase Web API key là cấu hình client, không dùng làm bí mật server.
+- Pages Functions truy cập Firestore bằng secret `FIRESTORE_SERVICE_ACCOUNT`; không đưa JSON key vào repo. Service account có quyền `roles/datastore.user` cấp ở project nên có thể đọc/ghi toàn Firestore của `ant05-efa02`, dù app chỉ dùng collection `phongthuchi`.
+- Người mới đăng nhập Google được tạo tài khoản tự động nhưng chưa có quyền vào phòng. Họ cần link mời riêng từ chủ phòng; vai trò ban đầu là `member` và chủ phòng có thể đổi sau khi vào phòng. Duyệt bật mặc định cho phòng cũ lẫn phòng mới; chủ phòng có thể tắt/bật ở tab Thành viên.
+- Từ version 5, đăng nhập username/mật khẩu cũ bị tắt và các hash mật khẩu cũ đã được xóa khỏi D1 trước khi copy. Chủ phòng dùng PIN để gắn tài khoản Google mới vào ghế chủ; với thành viên khác, chủ phòng cần gỡ liên kết tài khoản cũ rồi gửi link mời tới tài khoản Google mới. Membership, phòng và lịch sử chi tiêu được giữ lại trong Firestore.
+- PIN chỉ để khôi phục quyền `owner` của đúng phòng. Người dùng phải đăng nhập Google trước, nhập mã phòng, PIN hiện tại và PIN mới; PIN mới được lưu băm riêng trong Firestore. PIN không cấp quyền `manager`/`member` và không thay thế đăng nhập Google.
+- D1 production được giữ nguyên làm bản dự phòng sau khi copy; dữ liệu chính của ứng dụng hiện ở Firestore. Không chạy migration D1 v5 để sử dụng app.
+- Quên mật khẩu Google thì dùng quy trình khôi phục tài khoản của Google; ứng dụng không lưu hoặc đặt lại mật khẩu Google.

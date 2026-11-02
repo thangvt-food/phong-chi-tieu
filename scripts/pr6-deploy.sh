@@ -206,7 +206,7 @@ fi
 
 # ---------------------------------------------------------------- 2. baseline
 say "2. Ghi lại số dòng + dấu vân danh tính dòng trước khi migrate"
-COUNTS="SELECT (SELECT COUNT(*) FROM members) m,(SELECT COUNT(*) FROM periods) p,(SELECT COUNT(*) FROM expenses) e,(SELECT COUNT(*) FROM member_shares) s,(SELECT COUNT(*) FROM settings) st;"
+COUNTS="SELECT (SELECT COUNT(*) FROM rooms) r,(SELECT COUNT(*) FROM members) m,(SELECT COUNT(*) FROM periods) p,(SELECT COUNT(*) FROM expenses) e,(SELECT COUNT(*) FROM member_shares) s,(SELECT COUNT(*) FROM settings) st;"
 FINGER="SELECT group_concat(x) f FROM (SELECT id||':'||COALESCE(name,'')||':'||COALESCE(phone,'') x FROM members UNION ALL SELECT id||':'||COALESCE(title,'')||':'||CAST(amount AS TEXT) FROM expenses UNION ALL SELECT period_id||'/'||member_id||':'||CAST(is_paid AS TEXT)||':'||CAST(COALESCE(paid_amount,0) AS TEXT) FROM member_shares ORDER BY 1);"
 BEFORE=$(d1r "$COUNTS")
 BEFORE_F=$(d1r "$FINGER")
@@ -235,10 +235,11 @@ if [ "$APPLY" = 1 ]; then
   if python3 - "$BEFORE" "$AFTER" "$BEFORE_F" "$AFTER_F" <<'PY'
 import json, sys
 b, a = json.loads(sys.argv[1])[0], json.loads(sys.argv[2])[0]
-# settings được phép tăng đúng 1 dòng (transfer_code); các bảng khác phải nguyên số dòng.
+# Migration 005 có thể thêm một cờ join_approval cho mỗi phòng; mọi bảng khác phải nguyên số dòng.
 bad = {k: (b[k], a[k]) for k in b if k != "st" and b[k] != a[k]}
-if b["st"] not in (a["st"], a["st"] - 1):
-    bad["st"] = (b["st"], a["st"])
+settings_delta = a["st"] - b["st"]
+if not 0 <= settings_delta <= b["r"]:
+    bad["st"] = (b["st"], a["st"], "chỉ được thêm tối đa một cờ cho mỗi phòng")
 bf = json.loads(sys.argv[3])[0]["f"]
 af = json.loads(sys.argv[4])[0]["f"]
 if bf != af:
@@ -252,6 +253,21 @@ if bad:
 print("  OK: từng dòng members/expenses/member_shares giống hệt nhau trước và sau", flush=True)
 PY
   then :; else
+    echo "  ! DỪNG ở bước 4, CHƯA deploy gì cả." >&2
+    echo "  ! Rollback: bash scripts/pr6-deploy.sh --rollback $EXPORT --yes" >&2
+    exit 1
+  fi
+  AUTH_STATE=$(d1r "SELECT (SELECT COUNT(*) FROM rooms) AS room_count,(SELECT COUNT(*) FROM settings WHERE key='join_approval' AND value='1') AS approval_count,(SELECT COUNT(*) FROM user_sessions WHERE revoked_at IS NULL) AS active_sessions,(SELECT COUNT(*) FROM users WHERE password_hash!='google-auth-only') AS old_hashes")
+  if ! python3 - "$AUTH_STATE" <<'PY'
+import json, sys
+state = json.loads(sys.argv[1])[0]
+if state["approval_count"] != state["room_count"]:
+    raise SystemExit("  ! Không phải mọi phòng đều bật duyệt thành viên.")
+if state["active_sessions"] or state["old_hashes"]:
+    raise SystemExit("  ! Session cũ hoặc hash mật khẩu cũ còn tồn tại.")
+print("  OK: duyệt bật cho mọi phòng; session/hash mật khẩu cũ đã vô hiệu hóa")
+PY
+  then
     echo "  ! DỪNG ở bước 4, CHƯA deploy gì cả." >&2
     echo "  ! Rollback: bash scripts/pr6-deploy.sh --rollback $EXPORT --yes" >&2
     exit 1

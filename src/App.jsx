@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Loader2, AlertCircle, Home, Plus, Link2, LogOut, WifiOff, DoorOpen } from 'lucide-react';
+import { Loader2, AlertCircle, Home, Plus, Link2, LogOut, WifiOff, DoorOpen, Search, ShieldCheck } from 'lucide-react';
 import Header from './components/Header';
 import PeriodSelector from './components/PeriodSelector';
 import OverviewStats from './components/OverviewStats';
@@ -10,9 +10,9 @@ import PaymentModal from './components/PaymentModal';
 import MemberDetailModal from './components/MemberDetailModal';
 import VietQrModal from './components/VietQrModal';
 import AdminDashboard from './components/AdminDashboard';
+import ActivityLogModal from './components/ActivityLogModal';
 import AuthGate from './components/AuthGate';
 import AddRoomModal from './components/AddRoomModal';
-import ChangePasswordModal from './components/ChangePasswordModal';
 import {
   fetchRoomData,
   saveExpense,
@@ -38,6 +38,7 @@ export default function App() {
   const [auth, setAuth] = useState(() => getStoredUser());
   const [authReady, setAuthReady] = useState(false);
   const [myRooms, setMyRooms] = useState([]);
+  const [pendingRequests, setPendingRequests] = useState([]);
   const [invite, setInvite] = useState(null);
 
   const [roomId, setRoomId] = useState('');
@@ -61,7 +62,9 @@ export default function App() {
   const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState(false);
   const [addRoomOpen, setAddRoomOpen] = useState(false);
   const [addRoomTab, setAddRoomTab] = useState('create');
-  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [ownerRecoveryOpen, setOwnerRecoveryOpen] = useState(false);
+  const [roomPickerOpen, setRoomPickerOpen] = useState(false);
+  const [isLogsOpen, setIsLogsOpen] = useState(false);
 
   const loadRoom = async (target, { spinner = false } = {}) => {
     if (!target) return null;
@@ -74,8 +77,9 @@ export default function App() {
     if (res.source === 'need_auth') {
       setAuth(null);
       setMyRooms([]);
+      setPendingRequests([]);
     }
-    if (res.source === 'd1' || res.source === 'offline') {
+    if (res.source === 'firestore' || res.source === 'offline') {
       setLastRoomId(target);
       setSelectedPeriodId((prev) =>
         (res.periods || []).some((p) => p.id === prev) ? prev : res.periods?.[0]?.id || ''
@@ -92,12 +96,14 @@ export default function App() {
     if (me.needsAuth) {
       setAuth(null);
       setMyRooms([]);
+      setPendingRequests([]);
       setData(null);
       return null;
     }
     if (me.user) {
       setAuth(me.user);
       setMyRooms(me.rooms || []);
+      setPendingRequests(me.pending_requests || []);
     }
     return me;
   };
@@ -125,6 +131,7 @@ export default function App() {
       if (me.needsAuth || (!me.user && !me.offline)) {
         setInvite(pendingInvite);
         setAuth(null);
+        setPendingRequests([]);
         setLoading(false);
         setAuthReady(true);
         return;
@@ -146,6 +153,7 @@ export default function App() {
 
       setAuth(me.user);
       setMyRooms(me.rooms || []);
+      setPendingRequests(me.pending_requests || []);
       let rooms = me.rooms || [];
       let target = '';
 
@@ -157,8 +165,9 @@ export default function App() {
             setAuth(fresh.user);
             rooms = fresh.rooms || [];
             setMyRooms(rooms);
+            setPendingRequests(fresh.pending_requests || []);
           }
-          target = claim.room_id;
+          if (!claim.pending) target = claim.room_id;
         } else {
           alert(claim.error || 'Không nhận được link mời.');
         }
@@ -167,10 +176,29 @@ export default function App() {
       if (!target) {
         const urlRoom = params.get('p') || '';
         const last = getLastRoomId();
-        if (urlRoom && rooms.some((r) => r.room_id === urlRoom)) target = urlRoom;
-        else if (last && rooms.some((r) => r.room_id === last)) target = last;
-        else if (rooms.length) target = rooms[0].room_id;
-        else if (urlRoom) target = urlRoom;
+        const managedRooms = rooms.filter((r) => r.role === 'owner' || r.role === 'manager');
+
+        if (urlRoom && rooms.some((r) => r.room_id === urlRoom)) {
+          target = urlRoom;
+        } else if (last && rooms.some((r) => r.room_id === last)) {
+          target = last;
+        } else if (managedRooms.length === 1) {
+          // Là chủ/quản lý đúng 1 phòng -> vào thẳng phòng đó
+          target = managedRooms[0].room_id;
+        } else if (managedRooms.length > 1) {
+          // Quản lý nhiều phòng -> chọn phòng đầu tiên và mở bảng chọn chuyển phòng
+          target = managedRooms[0].room_id;
+          setRoomPickerOpen(true);
+        } else if (rooms.length === 1) {
+          // Thành viên chỉ tham gia 1 phòng -> vào thẳng
+          target = rooms[0].room_id;
+        } else if (rooms.length > 1) {
+          // Tham gia nhiều phòng -> vào phòng đầu và mở chọn
+          target = rooms[0].room_id;
+          setRoomPickerOpen(true);
+        } else if (urlRoom) {
+          target = urlRoom;
+        }
       }
 
       if (target) {
@@ -240,16 +268,20 @@ export default function App() {
 
   const handleAuthed = async ({ claimedRoomId } = {}) => {
     setInvite(null);
+    setOwnerRecoveryOpen(false);
     const fresh = await authMe();
     if (!fresh.user) {
       setAuth(null);
       return;
     }
     setAuth(fresh.user);
-    setMyRooms(fresh.rooms || []);
     const rooms = fresh.rooms || [];
+    setMyRooms(rooms);
+    setPendingRequests(fresh.pending_requests || []);
     let target = claimedRoomId;
-    if (!target || !rooms.some((r) => r.room_id === target)) target = rooms[0]?.room_id || '';
+    if (!target || !rooms.some((r) => r.room_id === target)) {
+      target = rooms[0]?.room_id || '';
+    }
     if (target) {
       const url = new URL(window.location.href);
       url.searchParams.set('p', target);
@@ -260,13 +292,15 @@ export default function App() {
     }
   };
 
-  const handleEnterRoom = async (next) => {
+  const handleEnterRoom = async (next, { pending = false } = {}) => {
     setAddRoomOpen(false);
     const fresh = await authMe();
     if (fresh.user) {
       setAuth(fresh.user);
       setMyRooms(fresh.rooms || []);
+      setPendingRequests(fresh.pending_requests || []);
     }
+    if (pending) return;
     await switchRoom(next);
   };
 
@@ -277,13 +311,17 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    await authLogout();
-    setAuth(null);
-    setMyRooms([]);
-    setData(null);
-    setSelectedPeriodId('');
-    setRoomId('');
-    setIsAdminDashboardOpen(false);
+    try {
+      await authLogout();
+    } finally {
+      setAuth(null);
+      setMyRooms([]);
+      setPendingRequests([]);
+      setData(null);
+      setSelectedPeriodId('');
+      setRoomId('');
+      setIsAdminDashboardOpen(false);
+    }
   };
 
   const handleLeaveRoom = async () => {
@@ -443,6 +481,18 @@ export default function App() {
     );
   }
 
+  if (ownerRecoveryOpen) {
+    const recoveryRoomId =
+      new URLSearchParams(window.location.search).get('p') || getLastRoomId() || '';
+    return (
+      <AuthGate
+        roomHint={recoveryRoomId ? { roomId: recoveryRoomId } : null}
+        onAuthed={handleAuthed}
+        onCancel={() => setOwnerRecoveryOpen(false)}
+      />
+    );
+  }
+
   if (!myRooms.length) {
     return (
       <>
@@ -457,13 +507,46 @@ export default function App() {
                 Tạo phòng mới, hoặc nhận link mời từ chủ phòng để bắt đầu.
               </p>
             </div>
+            {pendingRequests.length > 0 && (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-left">
+                <p className="text-xs font-bold text-amber-900">
+                  {pendingRequests.some((request) => request.status === 'pending')
+                    ? 'Trạng thái yêu cầu tham gia'
+                    : 'Kết quả yêu cầu tham gia'}
+                </p>
+                {pendingRequests.map((request) => (
+                  <p
+                    key={request.id}
+                    className={`text-[11px] mt-1 ${request.status === 'rejected' ? 'text-rose-700' : 'text-amber-800'}`}
+                  >
+                    {request.room_name} · hồ sơ {request.member_name}
+                    {request.status === 'rejected' ? ' · yêu cầu bị từ chối' : ' · đang chờ duyệt'}
+                  </p>
+                ))}
+                <button
+                  onClick={refreshMe}
+                  className="mt-2 text-[11px] font-semibold text-amber-900 underline"
+                >
+                  Kiểm tra lại trạng thái
+                </button>
+              </div>
+            )}
             <div className="flex flex-col gap-2">
+              <button
+                onClick={() => {
+                  setAddRoomTab('search');
+                  setAddRoomOpen(true);
+                }}
+                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm"
+              >
+                <Search className="w-4 h-4" /> Tìm phòng để gia nhập
+              </button>
               <button
                 onClick={() => {
                   setAddRoomTab('create');
                   setAddRoomOpen(true);
                 }}
-                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold flex items-center justify-center gap-1.5"
+                className="w-full py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold flex items-center justify-center gap-1.5"
               >
                 <Plus className="w-4 h-4" /> Tạo phòng mới
               </button>
@@ -472,9 +555,15 @@ export default function App() {
                   setAddRoomTab('join');
                   setAddRoomOpen(true);
                 }}
-                className="w-full py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center justify-center gap-1.5"
+                className="w-full py-2 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-600 text-xs font-semibold flex items-center justify-center gap-1.5 border border-slate-200"
               >
-                <Link2 className="w-4 h-4" /> Nhận link mời
+                <Link2 className="w-4 h-4" /> Dán link mời
+              </button>
+              <button
+                onClick={() => setOwnerRecoveryOpen(true)}
+                className="w-full py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold"
+              >
+                Tôi là chủ phòng · khôi phục bằng PIN
               </button>
               <button
                 onClick={handleLogout}
@@ -594,7 +683,10 @@ export default function App() {
           setIsExpenseModalOpen(true);
         }}
         onOpenSettings={() => setIsAdminDashboardOpen(true)}
-        onOpenChangePassword={() => setPasswordOpen(true)}
+          onOpenLogs={() => setIsLogsOpen(true)}
+        onManageGoogleAccount={() =>
+          window.open('https://myaccount.google.com/security', '_blank', 'noopener,noreferrer')
+        }
         onLogout={handleLogout}
       />
 
@@ -632,6 +724,7 @@ export default function App() {
           onTogglePaid={handleTogglePaid}
           onRecordPayment={handleRecordPayment}
           onSelectMember={(calc) => setDetailMemberId(calc.member.id)}
+          onOpenLogs={() => setIsLogsOpen(true)}
         />
 
         <ExpenseList
@@ -692,6 +785,11 @@ export default function App() {
         onRecordPayment={handleRecordPayment}
       />
 
+            <ActivityLogModal
+        isOpen={isLogsOpen}
+        onClose={() => setIsLogsOpen(false)}
+        logs={data?.activity_logs || []}
+      />
       <AdminDashboard
         isOpen={isAdminDashboardOpen}
         roomId={roomId}
@@ -702,17 +800,82 @@ export default function App() {
         onAuthRefresh={refreshAll}
       />
 
-      <AddRoomModal
+            {/* Modal Chọn phòng quản trị khi quản lý nhiều phòng */}
+      {roomPickerOpen && myRooms.length > 1 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl border border-slate-100 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-indigo-600 flex items-center justify-center text-white">
+                  <ShieldCheck className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900">Chọn phòng quản lý</h3>
+                  <p className="text-[11px] text-slate-500">Bạn đang tham gia hoặc quản lý nhiều phòng</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setRoomPickerOpen(false)}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+              >
+                <Plus className="w-4 h-4 rotate-45" />
+              </button>
+            </div>
+
+            <div className="space-y-2 max-h-60 overflow-y-auto">
+              {myRooms.map((r) => {
+                const isSelected = r.room_id === roomId;
+                const isOwnerOrManager = r.role === "owner" || r.role === "manager";
+                return (
+                  <button
+                    key={r.room_id}
+                    onClick={() => {
+                      setRoomPickerOpen(false);
+                      if (r.room_id !== roomId) handleSwitchRoom(r.room_id);
+                    }}
+                    className={`w-full p-3 rounded-2xl border text-left transition-all flex items-center justify-between gap-3 ${
+                      isSelected
+                        ? "bg-indigo-50 border-indigo-300 ring-2 ring-indigo-200"
+                        : "bg-slate-50 border-slate-200 hover:bg-slate-100"
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-xs text-slate-900 truncate">{r.room_name}</span>
+                        {isOwnerOrManager && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-semibold">
+                            {r.role === "owner" ? "Chủ phòng" : "Quản lý"}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] text-slate-400 block font-mono">{r.room_id}</span>
+                    </div>
+                    <span className="text-xs font-semibold text-indigo-600 shrink-0">
+                      {isSelected ? "Đang mở" : "Chuyển vào"}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setRoomPickerOpen(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl"
+              >
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+<AddRoomModal
         isOpen={addRoomOpen}
         initialTab={addRoomTab}
         onClose={() => setAddRoomOpen(false)}
         onEnter={handleEnterRoom}
       />
 
-      <ChangePasswordModal
-        isOpen={passwordOpen}
-        onClose={() => setPasswordOpen(false)}
-      />
     </div>
   );
 }

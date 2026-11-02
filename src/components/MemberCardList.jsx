@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   QrCode,
   CheckCircle2,
@@ -6,6 +6,9 @@ import {
   CircleDot,
   Users,
   HandCoins,
+  AlertCircle,
+  X,
+  History,
 } from 'lucide-react';
 import { formatMoney } from '../services/api';
 import confetti from 'canvas-confetti';
@@ -20,7 +23,50 @@ export default function MemberCardList({
   onTogglePaid,
   onRecordPayment,
   onSelectMember,
+  onOpenLogs,
 }) {
+  const [confirmDialog, setConfirmDialog] = useState(null);
+  const [confirmInput, setConfirmInput] = useState('');
+  const [confirmError, setConfirmError] = useState('');
+
+  const requestToggle = (calc) => {
+    const { member, totalAmount, paidAmount = 0, isPaid, isPartial } = calc;
+    const amountToClear = isPaid ? paidAmount : (isPartial ? (totalAmount - paidAmount) : totalAmount);
+    
+    // Mở popup yêu cầu nhập đúng số tiền cần xoá nợ / thanh toán để xác nhận
+    setConfirmDialog({
+      memberId: member.id,
+      memberName: member.nickname || member.name,
+      totalAmount,
+      currentPaid: isPaid,
+      targetAmount: amountToClear,
+      isCancelPaid: isPaid,
+    });
+    setConfirmInput('');
+    setConfirmError('');
+  };
+
+  const handleConfirmSubmit = (e) => {
+    e.preventDefault();
+    if (!confirmDialog) return;
+    const num = parseInt(confirmInput.replace(/\D/g, ''), 10) || 0;
+    if (num !== confirmDialog.targetAmount) {
+      setConfirmError(`Số tiền nhập không khớp! Hãy nhập chính xác ${confirmDialog.targetAmount.toLocaleString('vi-VN')}`);
+      return;
+    }
+
+    const nextPaid = !confirmDialog.currentPaid;
+    onTogglePaid(periodId, confirmDialog.memberId, nextPaid, nextPaid ? confirmDialog.totalAmount : 0);
+    if (nextPaid) {
+      confetti({
+        particleCount: 40,
+        spread: 60,
+        origin: { y: 0.8 },
+      });
+    }
+    setConfirmDialog(null);
+  };
+
   const handleToggle = (memberId, totalAmount, currentPaid) => {
     const nextPaid = !currentPaid;
     // Nộp đủ -> ghi đủ tổng; bỏ nộp -> về 0; đang trả dở bấm -> thu nốt cho đủ
@@ -42,6 +88,16 @@ export default function MemberCardList({
           <Users className="w-4 h-4 text-indigo-600 stroke-[2.5]" />
           <span>Thành viên ({memberCalculations.length})</span>
         </div>
+        {onOpenLogs && (
+          <button
+            onClick={onOpenLogs}
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 text-[11px] font-semibold transition-colors"
+            title="Xem nhật ký giao dịch tiền & chi tiêu"
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>Lịch sử thu/chi</span>
+          </button>
+        )}
       </div>
 
       {/* Compact Member Rows */}
@@ -128,7 +184,7 @@ export default function MemberCardList({
                 {canActRow && (
                   <>
                 <button
-                  onClick={() => handleToggle(member.id, totalAmount, isPaid)}
+                  onClick={() => requestToggle(calc)}
                   className={`p-1.5 rounded-xl transition-all ${
                     isPaid
                       ? 'text-emerald-600 bg-emerald-100/70 hover:bg-emerald-200'
@@ -176,6 +232,100 @@ export default function MemberCardList({
             </div>
           );
         })}
+            {/* Modal xác nhận nhập số tiền để xóa nợ / thanh toán */}
+      {confirmDialog && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn"
+          onClick={() => setConfirmDialog(null)}
+        >
+          <div 
+            className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl border border-slate-100 p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+                  confirmDialog.isCancelPaid ? "bg-rose-100 text-rose-600" : "bg-emerald-100 text-emerald-600"
+                }`}>
+                  <AlertCircle className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-sm text-slate-900">
+                    {confirmDialog.isCancelPaid ? "Xác nhận hủy thanh toán" : "Xác nhận xóa hết nợ"}
+                  </h4>
+                  <p className="text-[11px] text-slate-500">{confirmDialog.memberName}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmSubmit} className="space-y-3">
+              <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
+                <p>
+                  {confirmDialog.isCancelPaid ? "Số tiền sẽ hủy về 0 ₫:" : "Số tiền nợ sẽ xóa trắng:"}
+                </p>
+                <p className="text-base font-extrabold text-indigo-600">
+                  {formatMoney(confirmDialog.targetAmount)}
+                </p>
+                <p className="text-[10px] text-slate-400">
+                  Để tránh bấm nhầm làm xóa trắng nợ, hãy nhập chính xác số tiền trên để xác nhận.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Nhập số tiền xác nhận:
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoFocus
+                  value={confirmInput}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/\D/g, "");
+                    setConfirmInput(raw ? Number(raw).toLocaleString("vi-VN") : "");
+                    setConfirmError("");
+                  }}
+                  placeholder={String(confirmDialog.targetAmount)}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                />
+              </div>
+
+              {confirmError && (
+                <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{confirmError}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setConfirmDialog(null)}
+                  className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow-sm transition-colors ${
+                    confirmDialog.isCancelPaid
+                      ? "bg-rose-600 hover:bg-rose-700"
+                      : "bg-emerald-600 hover:bg-emerald-700"
+                  }`}
+                >
+                  {confirmDialog.isCancelPaid ? "Xác nhận hủy nộp" : "Xác nhận xóa nợ"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "ant05-efa02"
+  },
+  "targets": {
+    "ant05-efa02": {
+      "hosting": {
+        "app": [
+          "phong-chi-tieu"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

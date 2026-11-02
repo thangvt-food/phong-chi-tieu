@@ -1,5 +1,6 @@
 -- Cloudflare D1 - schema cho DB dựng mới, đã bao gồm toàn bộ migration (002 đa phòng,
--- 003 link mời phân quyền). DB đang có dữ liệu thì chạy migrations/00N_*.sql theo thứ tự,
+-- 003 link mời, 004 tài khoản và 005 Google Auth/duyệt thành viên).
+-- DB đang có dữ liệu thì chạy migrations/00N_*.sql theo thứ tự,
 -- KHÔNG chạy file này (nó DROP/CREATE lại từ đầu qua npm run db:schema:local).
 -- Hình dạng cuối của từng bảng phải khớp file migration tương ứng — smoke.sh chạy trên
 -- DB dựng từ file này nên lệch là test không còn phản ánh prod.
@@ -97,12 +98,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen_at DATETIME
 );
 
--- Version 4: tài khoản và liên kết tài khoản ↔ thành viên. Phải khớp migrations/004_accounts.sql.
+-- Version 5: tài khoản Google và duyệt thành viên. Phải khớp migrations/005_google_auth_and_join_approval.sql.
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
   username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
   display_name  TEXT NOT NULL,
   password_hash TEXT NOT NULL,
+  firebase_uid  TEXT,
+  email         TEXT,
   created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -130,10 +133,28 @@ CREATE TABLE IF NOT EXISTS auth_throttle (
   locked_until DATETIME
 );
 
+CREATE TABLE IF NOT EXISTS join_requests (
+  id          TEXT PRIMARY KEY,
+  room_id     TEXT NOT NULL,
+  member_id   TEXT NOT NULL,
+  user_id     TEXT NOT NULL,
+  role        TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('viewer','member','manager')),
+  status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at DATETIME
+);
+
 CREATE INDEX IF NOT EXISTS ix_invites_room_member ON invites(room_id, member_id);
 CREATE INDEX IF NOT EXISTS ix_usession_user       ON user_sessions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_users_firebase_uid ON users(firebase_uid);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_membership_room_user ON memberships(room_id, user_id);
 CREATE INDEX IF NOT EXISTS ix_membership_user     ON memberships(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_join_requests_pending_member
+  ON join_requests(room_id, member_id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS ix_join_requests_room_status
+  ON join_requests(room_id, status, created_at);
+CREATE INDEX IF NOT EXISTS ix_join_requests_user_status
+  ON join_requests(user_id, status, created_at);
 CREATE INDEX IF NOT EXISTS ix_sessions_room       ON sessions(room_id, member_id);
 CREATE INDEX IF NOT EXISTS ix_exp_room_period     ON expenses(room_id, period_id);
 CREATE INDEX IF NOT EXISTS ix_exp_room_date       ON expenses(room_id, expense_date);
@@ -143,11 +164,12 @@ CREATE TABLE IF NOT EXISTS schema_meta (
   version    INTEGER PRIMARY KEY,
   applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
--- DB dựng mới đã có sẵn hình dạng của version 4, stamp cả ba để MAX(version) khớp
--- prod đi đường migration (002 -> 003 -> 004).
+-- DB dựng mới đã có sẵn hình dạng version 5, stamp các version trước để MAX(version)
+-- khớp prod đi đường migration (002 -> 003 -> 004 -> 005).
 INSERT OR IGNORE INTO schema_meta (version) VALUES (2);
 INSERT OR IGNORE INTO schema_meta (version) VALUES (3);
 INSERT OR IGNORE INTO schema_meta (version) VALUES (4);
+INSERT OR IGNORE INTO schema_meta (version) VALUES (5);
 
 -- Seed phòng mặc định cho DB mới tinh.
 INSERT OR IGNORE INTO rooms (room_id, name) VALUES ('phong-2a', 'Phòng Trọ 2A');
@@ -158,7 +180,8 @@ INSERT OR IGNORE INTO settings (room_id, key, value) VALUES
   ('phong-2a', 'account_no',       '9999999999'),
   ('phong-2a', 'account_name',     'NGUYEN VAN QUAN TRI'),
   ('phong-2a', 'transfer_prefix',  'TIEN PHONG'),
-  ('phong-2a', 'transfer_code',    'P2A');
+  ('phong-2a', 'transfer_code',    'P2A'),
+  ('phong-2a', 'join_approval',    '1');
 
 -- Hash của "123456". CHỈ cho D1 local: DB production phải đổi mã khôi phục ngay sau
 -- deploy (Khôi phục chủ phòng bằng PIN -> đặt PIN mới), nếu không ai biết PIN là chiếm được phòng.

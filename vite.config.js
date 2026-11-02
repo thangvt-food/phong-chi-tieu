@@ -5,12 +5,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 3000,
-    // Proxy các request /api sang server Functions local (npm run dev:server / dev:full).
-    // Muốn dev bắn thẳng lên production, đặt rõ:
-    //   VITE_API_TARGET=https://phong-chi-tieu.pages.dev npm run dev
     proxy: {
       '/api': {
-        target: process.env.VITE_API_TARGET || 'http://localhost:8788',
+        target: process.env.VITE_API_TARGET || 'https://phong-chi-tieu.pages.dev',
         changeOrigin: true,
         secure: false,
       },

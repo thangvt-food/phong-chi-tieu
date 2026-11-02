@@ -1,24 +1,15 @@
-// Cloudflare Pages Functions - Catch-all API Route for /api/*
-//
-// Từ migration 004, mọi đường trừ đăng ký / đăng nhập / xem trước link / khôi phục chủ
-// đều đòi phiên TÀI KHOẢN. Quyền trong phòng không nằm trong token: mỗi request đọc
-// lại memberships + members.is_active, nên "ngưng hoạt động" mất quyền ngay lập tức.
+import { FirebaseKeyFetchError, verifyFirebaseIdToken } from '../_lib/firebase.js';
+import { createFirestoreStore, firestoreDocumentId } from '../_lib/firestore.js';
 
 const DEFAULT_ROOM = 'phong-2a';
 const ROOM_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,29}$/;
-const USERNAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,31}$/;
 const PIN_RE = /^\d{6,12}$/;
 const INVITE_TOKEN_RE = /^[A-Za-z0-9_-]{40,}$/;
-
-// PBKDF2 ở tầng Workers. Nếu đo thấy vượt CPU 10ms của bản Free thì hạ số vòng xuống
-// 20k–30k — số vòng nằm ngay trong chuỗi hash nên nâng lại được mà không cần migrate.
-const PBKDF2_ITER = 100000;
 const SESSION_TTL_MS = 90 * 24 * 3600 * 1000;
 const THROTTLE_MAX = 5;
 const THROTTLE_LOCK_MS = 15 * 60 * 1000;
 const INVITE_TTL_MIN_DEFAULT = 7 * 24 * 60;
 const INVITE_TTL_MIN_MAX = 30 * 24 * 60;
-
 const ROLE_RANK = { viewer: 1, member: 2, manager: 3, owner: 4 };
 const INVITE_ROLES = ['viewer', 'member', 'manager'];
 const SETTINGS_WRITE_KEYS = [
@@ -28,7 +19,14 @@ const SETTINGS_WRITE_KEYS = [
   'account_name',
   'transfer_prefix',
   'transfer_code',
+  'join_approval',
 ];
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -36,12 +34,11 @@ function jsonResponse(data, status = 200) {
     headers: {
       'Content-Type': 'application/json;charset=UTF-8',
       'Cache-Control': 'no-store',
+      ...CORS_HEADERS,
     },
   });
 }
 
-// slug không hợp lệ -> trả lỗi, không âm thầm fallback (fallback chỉ dành cho
-// request thiếu hẳn ?p, tức deep link kỹ thuật cũ).
 function resolveRoomId(url, body) {
   const raw = url.searchParams.get('p') || (body && body.room_id);
   if (raw === null || raw === undefined || raw === '') return { roomId: DEFAULT_ROOM };
@@ -50,25 +47,17 @@ function resolveRoomId(url, body) {
   return { roomId: value };
 }
 
-// ---- Tiện ích mã hoá ----
-
 function b64url(bytes) {
-  let bin = '';
-  bytes.forEach((b) => { bin += String.fromCharCode(b); });
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function b64urlDecode(str) {
-  const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
-  const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  let binary = '';
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 async function sha256Hex(text) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 function newToken() {
@@ -79,244 +68,255 @@ function randomId(prefix) {
   return `${prefix}_${Date.now()}_${b64url(crypto.getRandomValues(new Uint8Array(4)))}`;
 }
 
-function isoAfter(ms) {
-  return new Date(Date.now() + ms).toISOString();
+function isoAfter(milliseconds) {
+  return new Date(Date.now() + milliseconds).toISOString();
 }
 
 function timingSafeEqual(a, b) {
   if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
+  let difference = 0;
+  for (let index = 0; index < a.length; index += 1) difference |= a[index] ^ b[index];
+  return difference === 0;
 }
 
 function timingSafeEqualStr(a, b) {
-  return timingSafeEqual(new TextEncoder().encode(String(a)), new TextEncoder().encode(String(b)));
-}
-
-async function derivePassword(password, salt, iterations) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(password),
-    'PBKDF2',
-    false,
-    ['deriveBits']
+  return timingSafeEqual(
+    new TextEncoder().encode(String(a)),
+    new TextEncoder().encode(String(b))
   );
-  const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
-    key,
-    256
-  );
-  return new Uint8Array(bits);
 }
 
-async function hashPassword(password) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const hash = await derivePassword(password, salt, PBKDF2_ITER);
-  return `pbkdf2$${PBKDF2_ITER}$${b64url(salt)}$${b64url(hash)}`;
-}
-
-async function verifyPassword(password, stored) {
-  const parts = String(stored || '').split('$');
-  if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
-  const iterations = parseInt(parts[1], 10);
-  if (!iterations || iterations < 1000) return false;
-  const salt = b64urlDecode(parts[2]);
-  const expected = b64urlDecode(parts[3]);
-  if (salt.length === 0 || expected.length !== 32) return false;
-  const actual = await derivePassword(password, salt, iterations);
-  return timingSafeEqual(actual, expected);
-}
-
-// Username không tồn tại vẫn tốn một phép PBKDF2: thời gian trả lời không lộ username có/không.
-const DUMMY_SALT = new Uint8Array(16);
-function burnPasswordTime() {
-  return derivePassword('dummy-password-for-timing', DUMMY_SALT, PBKDF2_ITER);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function normalizeUsername(value) {
-  return String(value || '').trim().toLowerCase();
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function normalizeRole(role) {
   return INVITE_ROLES.includes(role) ? role : 'member';
 }
 
-// ---- Phiên tài khoản (token opaque, DB chỉ chứa SHA-256) ----
+function rowKey(table, row) {
+  switch (table) {
+    case 'rooms': return row.room_id;
+    case 'settings': return [row.room_id, row.key];
+    case 'members': return row.id;
+    case 'periods': return [row.room_id, row.id];
+    case 'expenses': return row.id;
+    case 'member_shares': return [row.room_id, row.period_id, row.member_id];
+    case 'invites': return row.token_hash;
+    case 'sessions': return row.token_hash;
+    case 'users': return row.id;
+    case 'user_sessions': return row.token_hash;
+    case 'memberships': return [row.room_id, row.member_id];
+    case 'auth_throttle': return row.key;
+    case 'join_requests': return row.id;
+    case 'activity_logs': return [row.room_id, row.id];
+    case 'schema_meta': return row.version;
+    default: throw new Error(`Loại dữ liệu Firestore không được hỗ trợ: ${table}.`);
+  }
+}
+
+function writeRow(table, row) {
+  return { table, key: rowKey(table, row), record: row };
+}
+
+function deleteRow(table, row) {
+  return { delete: true, documentId: firestoreDocumentId(table, rowKey(table, row)) };
+}
+
+async function rowsFor(db, table, predicate = () => true) {
+  return (await db.list(table)).filter(predicate);
+}
+
+async function writeRows(db, table, rows) {
+  await db.commit(rows.map((row) => writeRow(table, row)));
+}
+
+async function deleteRows(db, table, rows) {
+  await db.commit(rows.map((row) => deleteRow(table, row)));
+}
 
 async function createUserSession(db, userId) {
   const token = newToken();
   const expiresAt = isoAfter(SESSION_TTL_MS);
-  await db.prepare(
-    'INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)'
-  ).bind(await sha256Hex(token), userId, expiresAt).run();
+  const tokenHash = await sha256Hex(token);
+  await db.set('user_sessions', tokenHash, {
+    token_hash: tokenHash,
+    user_id: userId,
+    created_at: new Date().toISOString(),
+    expires_at: expiresAt,
+    revoked_at: null,
+    last_seen_at: null,
+  });
   return { token, expires_at: expiresAt };
 }
 
-// null = không gửi token. err = có token nhưng chết.
 async function readUserSession(db, request) {
   const raw = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (!raw) return null;
   const tokenHash = await sha256Hex(raw);
-  // Một lượt đọc cho cả phiên + tài khoản: mỗi request phòng đều đi qua đây,
-  // thêm một round trip D1 ở đây là thêm độ trễ cho mọi thao tác ghi.
-  const row = await db.prepare(`
-    SELECT us.user_id, us.expires_at, us.revoked_at,
-           u.id AS u_id, u.username, u.display_name
-      FROM user_sessions us
-      LEFT JOIN users u ON u.id = us.user_id
-     WHERE us.token_hash = ?
-  `).bind(tokenHash).first();
-  if (!row) return { err: 'invalid' };
-  if (row.revoked_at) return { err: 'revoked' };
-  if (new Date(row.expires_at).getTime() <= Date.now()) return { err: 'expired' };
-  if (!row.u_id) return { err: 'invalid' };
+  const session = await db.get('user_sessions', tokenHash);
+  if (!session) return { err: 'invalid' };
+  if (session.revoked_at) return { err: 'revoked' };
+  if (new Date(session.expires_at).getTime() <= Date.now()) return { err: 'expired' };
+  const account = await db.get('users', session.user_id);
+  if (!account) return { err: 'invalid' };
+  if (!account.firebase_uid) return { err: 'google_required' };
   return {
-    user: { id: row.u_id, username: row.username, display_name: row.display_name },
+    user: {
+      id: account.id,
+      username: account.username,
+      display_name: account.display_name,
+      email: account.email || '',
+      firebase_uid: account.firebase_uid,
+    },
     tokenHash,
   };
 }
 
-// ---- Chống dò mật khẩu / PIN ----
-
 async function throttleCheck(db, key) {
-  const row = await db.prepare('SELECT failures, locked_until FROM auth_throttle WHERE key = ?')
-    .bind(key).first();
+  const row = await db.get('auth_throttle', key);
   if (!row?.locked_until) return { locked: false };
   const until = new Date(row.locked_until).getTime();
   if (until > Date.now()) {
     return { locked: true, retry_after_sec: Math.ceil((until - Date.now()) / 1000) };
   }
-  await db.prepare('DELETE FROM auth_throttle WHERE key = ?').bind(key).run();
+  await db.delete('auth_throttle', key);
   return { locked: false };
 }
 
 async function recordAuthFailure(db, key) {
-  const row = await db.prepare('SELECT failures FROM auth_throttle WHERE key = ?').bind(key).first();
-  const failures = (row?.failures || 0) + 1;
+  const current = await db.get('auth_throttle', key);
+  const failures = (current?.failures || 0) + 1;
   const locked = failures >= THROTTLE_MAX;
-  await db.prepare(`
-    INSERT INTO auth_throttle (key, failures, locked_until) VALUES (?, ?, ?)
-    ON CONFLICT(key) DO UPDATE SET
-      failures = excluded.failures,
-      locked_until = excluded.locked_until
-  `).bind(key, locked ? 0 : failures, locked ? isoAfter(THROTTLE_LOCK_MS) : null).run();
+  await db.set('auth_throttle', key, {
+    key,
+    failures: locked ? 0 : failures,
+    locked_until: locked ? isoAfter(THROTTLE_LOCK_MS) : null,
+  });
   return { failures, locked };
 }
 
 async function clearAuthFailures(db, key) {
-  await db.prepare('DELETE FROM auth_throttle WHERE key = ?').bind(key).run();
+  await db.delete('auth_throttle', key);
 }
-
-// ---- Quyền trong phòng ----
 
 async function getOwnerMemberId(db, roomId) {
-  const row = await db.prepare('SELECT owner_member_id FROM rooms WHERE room_id = ?')
-    .bind(roomId).first();
-  return row?.owner_member_id || null;
+  return (await db.get('rooms', roomId))?.owner_member_id || null;
 }
 
-// Đọc lại từ DB mỗi request: token không mang quyền, ngưng hoạt động là chặn ngay.
-// Một query duy nhất (room + membership + member) thay vì ba lượt nối tiếp — mọi
-// endpoint phòng đều qua đây trước khi chạm dữ liệu thật.
 async function roomGate(db, user, roomId, minRole = 'viewer') {
-  const row = await db.prepare(`
-    SELECT r.room_id, r.name, r.owner_member_id,
-           m.id AS member_id, m.name AS member_name, m.nickname AS member_nickname,
-           m.phone AS member_phone, m.is_active AS member_active, ms.role AS member_role
-      FROM rooms r
-      LEFT JOIN memberships ms ON ms.room_id = r.room_id AND ms.user_id = ?
-      LEFT JOIN members m ON m.room_id = ms.room_id AND m.id = ms.member_id
-     WHERE r.room_id = ?
-  `).bind(user.id, roomId).first();
-  if (!row) {
+  const room = await db.get('rooms', roomId);
+  if (!room) {
     return { response: jsonResponse({ error: 'Phòng không tồn tại.', room_id: roomId }, 404) };
   }
-  if (!row.member_id) {
+  const membership = (await rowsFor(
+    db,
+    'memberships',
+    (row) => row.room_id === roomId && row.user_id === user.id
+  ))[0];
+  if (!membership) {
     return {
       response: jsonResponse({ error: 'Bạn không phải thành viên của phòng này.', room_id: roomId }, 403),
     };
   }
-  if (!row.member_active) {
+  const member = await db.get('members', membership.member_id);
+  if (!member || member.room_id !== roomId) {
     return {
-      response: jsonResponse({ error: 'Bạn đã bị ngưng khỏi phòng này.', room_id: roomId, inactive: true }, 403),
+      response: jsonResponse({ error: 'Hồ sơ thành viên của phòng không hợp lệ.', room_id: roomId }, 403),
     };
   }
-  const room = { room_id: row.room_id, name: row.name, owner_member_id: row.owner_member_id };
-  const member = {
-    id: row.member_id,
-    name: row.member_name,
-    nickname: row.member_nickname,
-    phone: row.member_phone,
-    is_active: row.member_active,
-    role: row.member_role,
-  };
+  if (!member.is_active) {
+    return {
+      response: jsonResponse({
+        error: 'Bạn đã bị ngưng khỏi phòng này.',
+        room_id: roomId,
+        inactive: true,
+      }, 403),
+    };
+  }
   const isOwner = room.owner_member_id === member.id;
-  const role = isOwner ? 'owner' : normalizeRole(member.role);
+  const role = isOwner ? 'owner' : normalizeRole(membership.role);
   if (ROLE_RANK[role] < ROLE_RANK[minRole]) {
     return {
-      response: jsonResponse({ error: 'Bạn không đủ quyền cho thao tác này.', room_id: roomId, role }, 403),
+      response: jsonResponse({
+        error: 'Bạn không đủ quyền cho thao tác này.',
+        room_id: roomId,
+        role,
+      }, 403),
     };
   }
   return { user, room, member, role, isOwner };
 }
 
 async function loadMember(db, roomId, memberId) {
-  return db.prepare('SELECT id, name, nickname, phone, is_active FROM members WHERE id = ? AND room_id = ?')
-    .bind(memberId, roomId).first();
+  const member = await db.get('members', memberId);
+  return member?.room_id === roomId ? member : null;
 }
 
 async function memberRank(db, roomId, memberId, ownerId) {
   if (memberId === ownerId) return ROLE_RANK.owner;
-  const row = await db.prepare('SELECT role FROM memberships WHERE room_id = ? AND member_id = ?')
-    .bind(roomId, memberId).first();
-  return ROLE_RANK[normalizeRole(row?.role)] || ROLE_RANK.viewer;
+  const membership = (await rowsFor(
+    db,
+    'memberships',
+    (row) => row.room_id === roomId && row.member_id === memberId
+  ))[0];
+  return ROLE_RANK[normalizeRole(membership?.role)] || ROLE_RANK.viewer;
 }
 
-// Ngưng hoạt động, không xóa dòng: member_shares / split_config là lịch sử tiền thật.
-// Giữ memberships để chủ phòng "Thêm lại" là người đó có quyền ngay khi đăng nhập lại.
 async function deactivateMember(db, roomId, memberId) {
-  await db.batch([
-    db.prepare('UPDATE members SET is_active = 0 WHERE id = ? AND room_id = ?')
-      .bind(memberId, roomId),
-    db.prepare('DELETE FROM invites WHERE room_id = ? AND member_id = ?')
-      .bind(roomId, memberId),
+  const member = await loadMember(db, roomId, memberId);
+  const invites = await rowsFor(
+    db,
+    'invites',
+    (row) => row.room_id === roomId && row.member_id === memberId
+  );
+  const requests = await rowsFor(
+    db,
+    'join_requests',
+    (row) => row.room_id === roomId && row.member_id === memberId && row.status === 'pending'
+  );
+  const now = new Date().toISOString();
+  await db.commit([
+    ...(member ? [writeRow('members', { ...member, is_active: 0 })] : []),
+    ...invites.map((row) => deleteRow('invites', row)),
+    ...requests.map((row) => writeRow('join_requests', {
+      ...row,
+      status: 'rejected',
+      reviewed_at: now,
+    })),
   ]);
 }
 
-// Chặn phòng mất chủ / mất người cuối. Trả message lỗi hoặc null.
 async function checkRemovable(db, roomId, memberId) {
-  const owner = await getOwnerMemberId(db, roomId);
-  if (memberId && owner && memberId === owner) {
+  const ownerId = await getOwnerMemberId(db, roomId);
+  if (memberId && ownerId && memberId === ownerId) {
     return 'Chủ phòng không rời/xóa được khi chưa giao phòng lại cho người khác.';
   }
-  const active = await db.prepare(
-    'SELECT COUNT(*) AS c FROM members WHERE room_id = ? AND is_active = 1'
-  ).bind(roomId).first();
-  const target = await db.prepare('SELECT is_active FROM members WHERE id = ? AND room_id = ?')
-    .bind(memberId, roomId).first();
-  if (target && target.is_active && (active?.c ?? 0) <= 1) {
+  const members = await rowsFor(db, 'members', (row) => row.room_id === roomId);
+  const activeCount = members.filter((row) => row.is_active).length;
+  const target = members.find((row) => row.id === memberId);
+  if (target?.is_active && activeCount <= 1) {
     return 'Phòng cần còn ít nhất một thành viên đang hoạt động.';
   }
   return null;
 }
 
-// ---- Link mời claim (một lần, chỉ dành cho người CHƯA có tài khoản) ----
-
 async function findInviteByToken(db, token) {
   const tokenHash = await sha256Hex(token);
-  return db.prepare(`
-    SELECT i.token_hash, i.room_id, i.member_id, i.role, i.expires_at, i.uses_left,
-           m.name AS member_name, m.is_active, r.name AS room_name
-      FROM invites i
-      JOIN members m ON m.id = i.member_id AND m.room_id = i.room_id
-      LEFT JOIN rooms r ON r.room_id = i.room_id
-     WHERE i.token_hash = ?
-  `).bind(tokenHash).first();
+  const invite = await db.get('invites', tokenHash);
+  if (!invite) return null;
+  const [member, room, setting] = await Promise.all([
+    loadMember(db, invite.room_id, invite.member_id),
+    db.get('rooms', invite.room_id),
+    db.get('settings', [invite.room_id, 'join_approval']),
+  ]);
+  return {
+    ...invite,
+    member_name: member?.name || '',
+    is_active: member?.is_active || 0,
+    room_name: room?.name || invite.room_id,
+    join_approval: setting?.value ?? '1',
+  };
 }
 
 function inviteUsable(invite) {
@@ -331,48 +331,60 @@ async function mintInvite(db, roomId, actor, body) {
     INVITE_TTL_MIN_MAX,
     Math.max(1, parseInt(body.ttl_min, 10) || INVITE_TTL_MIN_DEFAULT)
   );
-  const role = normalizeRole(body.role);
-
+  if (body.role && body.role !== 'member') {
+    return jsonResponse({
+      error: 'Link mời chỉ cấp quyền member; chủ phòng có thể đổi quyền sau khi tham gia.',
+    }, 400);
+  }
   const member = await loadMember(db, roomId, memberId);
   if (!member) {
     return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
   }
   if (!member.is_active) {
-    return jsonResponse({ error: 'Thành viên đã ngưng hoạt động, hãy thêm lại rồi mới mời.', room_id: roomId }, 409);
+    return jsonResponse({ error: 'Thành viên đã ngưng hoạt động, hãy thêm lại rồi mới mời.' }, 409);
   }
-  const ownerId = await getOwnerMemberId(db, roomId);
-  if (memberId === ownerId) {
-    return jsonResponse({ error: 'Chủ phòng nhận quyền bằng mã khôi phục, không dùng link mời.', room_id: roomId }, 409);
+  if (memberId === await getOwnerMemberId(db, roomId)) {
+    return jsonResponse({ error: 'Chủ phòng nhận quyền bằng mã khôi phục, không dùng link mời.' }, 409);
   }
-  const bound = await db.prepare('SELECT user_id FROM memberships WHERE room_id = ? AND member_id = ?')
-    .bind(roomId, memberId).first();
-  if (bound) {
-    return jsonResponse({ error: 'Thành viên này đã có tài khoản, không cần link nữa.', room_id: roomId }, 409);
-  }
-  if (role === 'manager' && !actor.isOwner) {
-    return jsonResponse({ error: 'Chỉ chủ phòng tạo được link mức Quản lý.', room_id: roomId }, 403);
+  const memberships = await rowsFor(
+    db,
+    'memberships',
+    (row) => row.room_id === roomId && row.member_id === memberId
+  );
+  if (memberships.length) {
+    return jsonResponse({ error: 'Thành viên này đã có tài khoản, không cần link nữa.' }, 409);
   }
 
   const token = newToken();
+  const tokenHash = await sha256Hex(token);
   const expiresAt = isoAfter(ttlMin * 60 * 1000);
-  await db.batch([
-    db.prepare('DELETE FROM invites WHERE room_id = ? AND member_id = ?').bind(roomId, memberId),
-    db.prepare(
-      'INSERT INTO invites (token_hash, room_id, member_id, role, expires_at, uses_left) VALUES (?, ?, ?, ?, ?, 1)'
-    ).bind(await sha256Hex(token), roomId, memberId, role, expiresAt),
+  const oldInvites = await rowsFor(
+    db,
+    'invites',
+    (row) => row.room_id === roomId && row.member_id === memberId
+  );
+  await db.commit([
+    ...oldInvites.map((row) => deleteRow('invites', row)),
+    writeRow('invites', {
+      token_hash: tokenHash,
+      room_id: roomId,
+      member_id: memberId,
+      role: 'member',
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt,
+      uses_left: 1,
+    }),
   ]);
   return jsonResponse({
     success: true,
     room_id: roomId,
     member_id: memberId,
     member_name: member.name,
-    role,
+    role: 'member',
     token,
     expires_at: expiresAt,
   });
 }
-
-// ---- Mã phòng / mã chuyển khoản ----
 
 function slugify(name) {
   const noAccents = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -385,13 +397,11 @@ function slugify(name) {
   return ROOM_SLUG_RE.test(slug) ? slug : '';
 }
 
-// Phòng trùng tên không còn là lỗi chặn: mã phòng chỉ là deep link kỹ thuật,
-// người dùng nhìn thấy tên phòng trong danh sách tài khoản.
 async function uniqueSlug(db, base) {
-  for (let i = 1; i < 50; i++) {
-    const slug = i === 1 ? base : `${base.slice(0, 24)}-${i}`;
-    const row = await db.prepare('SELECT room_id FROM rooms WHERE room_id = ?').bind(slug).first();
-    if (!row) return slug;
+  const existing = new Set((await db.list('rooms')).map((room) => room.room_id));
+  for (let index = 1; index < 50; index += 1) {
+    const slug = index === 1 ? base : `${base.slice(0, 24)}-${index}`;
+    if (!existing.has(slug)) return slug;
   }
   return null;
 }
@@ -399,26 +409,162 @@ async function uniqueSlug(db, base) {
 const GENERIC_ROOM_TOKENS = ['phong', 'tro', 'nha', 'nhatro', 'phongtro'];
 function deriveTransferCode(slug) {
   const tokens = String(slug || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  const meaningful = tokens.filter((t) => !GENERIC_ROOM_TOKENS.includes(t));
+  const meaningful = tokens.filter((token) => !GENERIC_ROOM_TOKENS.includes(token));
   return (meaningful.length ? meaningful : tokens).join('').toUpperCase().slice(0, 6);
 }
 
-// ---- Version schema ----
-
-const SCHEMA_VERSION = 4;
-let schemaReady = false;
-async function ensureSchema(db) {
-  if (schemaReady) return { ok: true };
-  try {
-    const row = await db
-      .prepare('SELECT version FROM schema_meta WHERE version = ?')
-      .bind(SCHEMA_VERSION)
-      .first();
-    schemaReady = !!row;
-    return { ok: schemaReady };
-  } catch (err) {
-    return { ok: false, error: String(err?.message || err) };
+async function authMeResponse(db, user) {
+  const memberships = await rowsFor(
+    db,
+    'memberships',
+    (row) => row.user_id === user.id
+  );
+  const rooms = [];
+  for (const membership of memberships) {
+    const [member, room] = await Promise.all([
+      loadMember(db, membership.room_id, membership.member_id),
+      db.get('rooms', membership.room_id),
+    ]);
+    if (!member?.is_active || !room) continue;
+    rooms.push({
+      room_id: membership.room_id,
+      room_name: room.name || membership.room_id,
+      member_id: membership.member_id,
+      member_name: member.name,
+      role: room.owner_member_id === member.id ? 'owner' : normalizeRole(membership.role),
+      created_at: membership.created_at || '',
+    });
   }
+  rooms.sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const pendingRequests = await rowsFor(
+    db,
+    'join_requests',
+    (row) => row.user_id === user.id
+      && (row.status === 'pending'
+        || (row.status === 'rejected' && new Date(row.reviewed_at || 0).getTime() >= cutoff))
+  );
+  const requests = [];
+  for (const row of pendingRequests) {
+    const [room, member] = await Promise.all([
+      db.get('rooms', row.room_id),
+      loadMember(db, row.room_id, row.member_id),
+    ]);
+    if (room && member) {
+      requests.push({
+        id: row.id,
+        room_id: row.room_id,
+        status: row.status,
+        room_name: room.name,
+        member_name: member.name,
+        created_at: row.created_at,
+      });
+    }
+  }
+  requests.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return {
+    user: {
+      id: user.id,
+      username: user.username,
+      display_name: user.display_name,
+      email: user.email || '',
+    },
+    rooms,
+    pending_requests: requests.slice(0, 20),
+  };
+}
+
+async function dataForRoom(db, gate, roomId) {
+  const [settingsRows, membersRows, membershipRows, periods, expenses, shares, rawLogs] = await Promise.all([
+    rowsFor(db, 'settings', (row) => row.room_id === roomId),
+    rowsFor(db, 'members', (row) => row.room_id === roomId),
+    rowsFor(db, 'memberships', (row) => row.room_id === roomId),
+    rowsFor(db, 'periods', (row) => row.room_id === roomId),
+    rowsFor(db, 'expenses', (row) => row.room_id === roomId),
+    rowsFor(db, 'member_shares', (row) => row.room_id === roomId),
+    rowsFor(db, 'activity_logs', (row) => row.room_id === roomId),
+  ]);
+  const settings = {};
+  for (const row of settingsRows) {
+    if (row.key !== 'admin_pin_hash') settings[row.key] = row.value;
+  }
+  const membershipByMember = new Map(membershipRows.map((row) => [row.member_id, row]));
+  const canSeePhone = ROLE_RANK[gate.role] >= ROLE_RANK.manager;
+  const members = membersRows
+    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+    .map((member) => {
+      const membership = membershipByMember.get(member.id);
+      return {
+        id: member.id,
+        name: member.name,
+        nickname: member.nickname,
+        phone: canSeePhone || member.id === gate.member.id ? member.phone : null,
+        is_active: member.is_active,
+        created_at: member.created_at,
+        role: member.id === gate.room.owner_member_id ? 'owner' : (membership?.role || null),
+        has_account: !!membership?.user_id,
+      };
+    });
+  periods.sort((a, b) => String(b.id).localeCompare(String(a.id)));
+  expenses.sort((a, b) =>
+    String(b.expense_date || '').localeCompare(String(a.expense_date || ''))
+      || String(b.created_at || '').localeCompare(String(a.created_at || ''))
+  );
+  const activityLogs = (rawLogs || []).sort((a, b) =>
+    String(b.created_at || '').localeCompare(String(a.created_at || ''))
+  ).slice(0, 50);
+
+  return {
+    hasFirestore: true,
+    room_id: roomId,
+    room_name: gate.room.name,
+    owner_member_id: gate.room.owner_member_id || null,
+    me: {
+      member_id: gate.member.id,
+      name: gate.member.name,
+      nickname: gate.member.nickname,
+      role: gate.role,
+      is_owner: gate.isOwner,
+    },
+    settings,
+    members,
+    periods,
+    expenses,
+    member_shares: shares,
+    activity_logs: activityLogs,
+  };
+}
+
+async function logActivity(db, roomId, userName, action, content) {
+  try {
+    const id = `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    await db.set('activity_logs', [roomId, id], {
+      id,
+      room_id: roomId,
+      user_name: userName || 'Hệ thống',
+      action,
+      content,
+      created_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('Failed to write activity log', err);
+  }
+}
+
+async function upsertShare(db, roomId, periodId, memberId, isPaid, paidAt, paidAmount) {
+  const key = [roomId, periodId, memberId];
+  const existing = await db.get('member_shares', key);
+  await db.set('member_shares', key, {
+    room_id: roomId,
+    period_id: periodId,
+    member_id: memberId,
+    amount: existing?.amount || 0,
+    is_paid: isPaid ? 1 : 0,
+    paid_at: paidAt,
+    paid_amount: paidAmount === null ? (existing?.paid_amount || 0) : paidAmount,
+    note: existing?.note || '',
+  });
 }
 
 export async function onRequest(context) {
@@ -427,100 +573,90 @@ export async function onRequest(context) {
   const path = url.pathname.replace(/^\/api\/?/, '');
   const method = request.method;
 
-  // App và Functions cùng origin (Pages) nên không cần CORS.
-  if (method === 'OPTIONS') return new Response(null, { status: 204 });
-
-  const db = env.DB;
-  if (!db) {
-    return jsonResponse({ error: 'D1 database chưa được cấu hình trên Cloudflare.' }, 503);
+  if (method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: CORS_HEADERS,
+    });
   }
-  const schema = await ensureSchema(db);
-  if (!schema.ok) {
-    return jsonResponse({
-      error: `Schema D1 chưa ở version ${SCHEMA_VERSION}. Chạy migrations/004_accounts.sql (sau 002/003) trước khi dùng.`,
-      schemaError: schema.error,
-    }, 503);
+  if (!env.FIREBASE_PROJECT_ID) {
+    return jsonResponse({ error: 'Thiếu cấu hình FIREBASE_PROJECT_ID trên Cloudflare Pages.' }, 503);
+  }
+  if (!env.FIRESTORE_SERVICE_ACCOUNT) {
+    return jsonResponse({ error: 'Firestore chưa được cấu hình trên Cloudflare Pages.' }, 503);
   }
 
+  const db = createFirestoreStore(env);
   try {
+    const schema = await db.get('schema_meta', 5);
+    if (!schema) {
+      return jsonResponse({
+        error: 'Firestore chưa có dữ liệu schema version 5. Hãy hoàn tất sao chép D1 vào collection phongthuchi trước khi dùng.',
+      }, 503);
+    }
+
     // ================= Không cần phiên =================
 
-    // POST /api/auth/register { username, password, display_name? }
-    if (path === 'auth/register' && method === 'POST') {
+    if (path === 'auth/google' && method === 'POST') {
       const body = await request.json().catch(() => ({}));
-      const username = normalizeUsername(body.username);
-      const password = String(body.password || '');
-      const displayName = String(body.display_name || '').trim().slice(0, 60);
-      if (!USERNAME_RE.test(username)) {
-        return jsonResponse({ error: 'Tên đăng nhập 3–32 ký tự, chỉ chữ, số và . _ -', field: 'username' }, 400);
-      }
-      if (password.length < 8 || password.length > 128) {
-        return jsonResponse({ error: 'Mật khẩu cần 8–128 ký tự.', field: 'password' }, 400);
-      }
-      const userId = randomId('usr');
+      let identity;
       try {
-        await db.prepare(
-          'INSERT INTO users (id, username, display_name, password_hash) VALUES (?, ?, ?, ?)'
-        ).bind(userId, username, displayName || username, await hashPassword(password)).run();
-      } catch (err) {
-        if (/UNIQUE/i.test(String(err?.message || err))) {
-          return jsonResponse({ error: 'Tên đăng nhập đã có người dùng.', field: 'username' }, 409);
+        identity = await verifyFirebaseIdToken(body.id_token, env.FIREBASE_PROJECT_ID);
+      } catch (error) {
+        if (error instanceof FirebaseKeyFetchError) {
+          return jsonResponse({ error: 'Dịch vụ xác minh Google tạm thời không khả dụng. Hãy thử lại.' }, 503);
         }
-        throw err;
+        return jsonResponse({ error: 'Không xác thực được tài khoản Google. Hãy đăng nhập lại.' }, 401);
       }
-      const session = await createUserSession(db, userId);
-      return jsonResponse({
-        success: true,
-        token: session.token,
-        expires_at: session.expires_at,
-        user: { id: userId, username, display_name: displayName || username },
-      });
-    }
 
-    // POST /api/auth/login { username, password }
-    if (path === 'auth/login' && method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const username = normalizeUsername(body.username);
-      const password = String(body.password || '');
-      if (!username || !password) {
-        return jsonResponse({ error: 'Nhập tên đăng nhập và mật khẩu.' }, 400);
-      }
-      const key = 'login:' + username;
-      const throttle = await throttleCheck(db, key);
-      if (throttle.locked) {
-        return jsonResponse({
-          error: 'Sai quá nhiều lần. Thử lại sau ít phút.',
-          retry_after_sec: throttle.retry_after_sec,
-        }, 429);
-      }
-      const user = await db.prepare(
-        'SELECT id, username, display_name, password_hash FROM users WHERE username = ?'
-      ).bind(username).first();
-      let ok = false;
-      if (user) {
-        ok = await verifyPassword(password, user.password_hash);
+      const usersList = await db.list('users');
+      let account = usersList.find((row) => row.firebase_uid === identity.uid)
+        || (identity.email ? usersList.find((row) => row.email === identity.email) : null);
+
+      if (!account) {
+        account = {
+          id: randomId('usr'),
+          username: `google-${(await sha256Hex(identity.uid)).slice(0, 24)}`,
+          display_name: identity.displayName || identity.email,
+          password_hash: 'google-auth-only',
+          firebase_uid: identity.uid,
+          email: identity.email,
+          created_at: new Date().toISOString(),
+        };
+        await db.set('users', account.id, account);
       } else {
-        await burnPasswordTime();
+        const updates = {};
+        if (account.firebase_uid !== identity.uid) updates.firebase_uid = identity.uid;
+        if (identity.email && account.email !== identity.email) updates.email = identity.email;
+        if (identity.displayName && !account.display_name) updates.display_name = identity.displayName;
+        if (Object.keys(updates).length > 0) {
+          account = { ...account, ...updates };
+          await db.set('users', account.id, account);
+        }
       }
-      if (!ok) {
-        const rec = await recordAuthFailure(db, key);
-        await sleep(200);
-        return jsonResponse({
-          error: 'Sai tên đăng nhập hoặc mật khẩu.',
-          locked: rec.locked,
-        }, 401);
-      }
-      await clearAuthFailures(db, key);
-      const session = await createUserSession(db, user.id);
+      const session = await createUserSession(db, account.id);
       return jsonResponse({
         success: true,
         token: session.token,
         expires_at: session.expires_at,
-        user: { id: user.id, username: user.username, display_name: user.display_name },
+        user: {
+          id: account.id,
+          username: account.username,
+          display_name: account.display_name,
+          email: account.email,
+        },
       });
     }
 
-    // GET /api/invites/:token - Giới thiệu ngắn cho màn claim
+    if (
+      method === 'POST'
+      && ['auth/register', 'auth/login', 'auth/change-password'].includes(path)
+    ) {
+      return jsonResponse({
+        error: 'Đăng nhập và tạo tài khoản bằng Google; việc đổi mật khẩu thực hiện trong tài khoản Google.',
+      }, 410);
+    }
+
     const previewMatch = /^invites\/([A-Za-z0-9_-]{40,})$/.exec(path);
     if (previewMatch && method === 'GET') {
       const invite = await findInviteByToken(db, previewMatch[1]);
@@ -532,135 +668,116 @@ export async function onRequest(context) {
         room_name: invite.room_name || invite.room_id,
         member_name: invite.member_name,
         role: normalizeRole(invite.role),
+        requires_approval: invite.join_approval !== '0',
       });
     }
 
-    // POST /api/rooms/recover-owner { pin, new_pin, username?, password?, display_name? }
-    // Có Bearer thì buộc membership của chủ phòng vào tài khoản đó; không có thì
-    // dùng tài khoản đã nhập (phải đúng mật khẩu) hoặc tạo mới.
     if (path === 'rooms/recover-owner' && method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const roomResolve = resolveRoomId(url, body);
       if (roomResolve.error) return jsonResponse({ error: roomResolve.error }, 400);
       const roomId = roomResolve.roomId;
-
-      const room = await db.prepare('SELECT room_id, name, owner_member_id FROM rooms WHERE room_id = ?')
-        .bind(roomId).first();
+      const room = await db.get('rooms', roomId);
       if (!room) return jsonResponse({ error: 'Phòng không tồn tại.', room_id: roomId }, 404);
 
       const pin = String(body.pin || '');
       const newPin = String(body.new_pin || '');
-      const key = 'pin:' + roomId;
-      const throttle = await throttleCheck(db, key);
+      const throttleKey = `pin:${roomId}`;
+      const throttle = await throttleCheck(db, throttleKey);
       if (throttle.locked) {
         return jsonResponse({
           error: 'Sai PIN quá nhiều lần. Thử lại sau ít phút.',
           retry_after_sec: throttle.retry_after_sec,
         }, 429);
       }
-
-      const pinRow = await db.prepare('SELECT value FROM settings WHERE room_id = ? AND key = ?')
-        .bind(roomId, 'admin_pin_hash').first();
-      if (!pinRow?.value) {
+      const pinSetting = await db.get('settings', [roomId, 'admin_pin_hash']);
+      if (!pinSetting?.value) {
         return jsonResponse({ error: 'Phòng chưa có mã khôi phục.', room_id: roomId }, 409);
       }
-      // Hash SHA-256 từng là credential ghi sổ: không nhận lại chuỗi 64 hex đó.
       if (!pin || /^[0-9a-f]{64}$/i.test(pin)) {
-        await recordAuthFailure(db, key);
+        await recordAuthFailure(db, throttleKey);
         await sleep(200);
         return jsonResponse({ error: 'Mã PIN không đúng.' }, 403);
       }
-      if (!timingSafeEqualStr(await sha256Hex(pin), String(pinRow.value).toLowerCase())) {
-        const rec = await recordAuthFailure(db, key);
+      if (!timingSafeEqualStr(
+        await sha256Hex(pin),
+        String(pinSetting.value).toLowerCase()
+      )) {
+        const failure = await recordAuthFailure(db, throttleKey);
         await sleep(200);
-        return jsonResponse({ error: 'Mã PIN không đúng.', locked: rec.locked }, 403);
+        return jsonResponse({ error: 'Mã PIN không đúng.', locked: failure.locked }, 403);
       }
-      if (!PIN_RE.test(newPin)) {
+      if (newPin && !PIN_RE.test(newPin)) {
         return jsonResponse({ error: 'Mã khôi phục mới cần 6–12 chữ số.' }, 400);
-      }
-      if (newPin === pin) {
-        return jsonResponse({ error: 'Mã mới phải khác mã cũ.' }, 400);
       }
 
       let ownerMemberId = room.owner_member_id;
       if (!ownerMemberId) {
-        const first = await db.prepare(`
-          SELECT id FROM members WHERE room_id = ? AND is_active = 1
-          ORDER BY created_at ASC, rowid ASC LIMIT 1
-        `).bind(roomId).first();
-        ownerMemberId = first?.id || null;
+        const activeMembers = await rowsFor(
+          db,
+          'members',
+          (row) => row.room_id === roomId && row.is_active
+        );
+        activeMembers.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+        ownerMemberId = activeMembers[0]?.id || null;
       }
       if (!ownerMemberId) {
         return jsonResponse({ error: 'Phòng chưa có thành viên đang hoạt động để nhận quyền chủ.' }, 409);
       }
-
       const current = await readUserSession(db, request);
-      let actor = current && !current.err ? current.user : null;
-      if (!actor) {
-        const username = normalizeUsername(body.username);
-        const password = String(body.password || '');
-        if (!USERNAME_RE.test(username) || password.length < 8 || password.length > 128) {
-          return jsonResponse({ error: 'Cần tài khoản nhận phòng: tên đăng nhập hợp lệ và mật khẩu từ 8 ký tự.' }, 400);
-        }
-        const existing = await db.prepare(
-          'SELECT id, username, display_name, password_hash FROM users WHERE username = ?'
-        ).bind(username).first();
-        if (existing) {
-          if (!await verifyPassword(password, existing.password_hash)) {
-            await recordAuthFailure(db, key);
-            await sleep(200);
-            return jsonResponse({ error: 'Tên đăng nhập hoặc mật khẩu không đúng để nhận phòng.' }, 403);
-          }
-          actor = { id: existing.id, username: existing.username, display_name: existing.display_name };
-        } else {
-          const userId = randomId('usr');
-          const displayName = String(body.display_name || '').trim().slice(0, 60) || username;
-          try {
-            await db.prepare(
-              'INSERT INTO users (id, username, display_name, password_hash) VALUES (?, ?, ?, ?)'
-            ).bind(userId, username, displayName, await hashPassword(password)).run();
-          } catch (err) {
-            if (/UNIQUE/i.test(String(err?.message || err))) {
-              return jsonResponse({ error: 'Tên đăng nhập đã có người dùng.', field: 'username' }, 409);
-            }
-            throw err;
-          }
-          actor = { id: userId, username, display_name: displayName };
-        }
+      if (!current || current.err) {
+        return jsonResponse({ error: 'Đăng nhập Google trước khi khôi phục chủ phòng.', needs_auth: true }, 401);
+      }
+      if (!current.user.firebase_uid) {
+        return jsonResponse({ error: 'Khôi phục chủ phòng yêu cầu tài khoản Google.' }, 403);
       }
 
-      const newHash = await sha256Hex(newPin);
-      await db.batch([
-        db.prepare('UPDATE rooms SET owner_member_id = ? WHERE room_id = ?')
-          .bind(ownerMemberId, roomId),
-        db.prepare('UPDATE members SET is_active = 1 WHERE id = ? AND room_id = ?')
-          .bind(ownerMemberId, roomId),
-        // Tài khoản cũ đang giữ ghế chủ mất phòng này; các phòng khác của họ không đụng.
-        db.prepare('DELETE FROM memberships WHERE room_id = ? AND user_id = ?')
-          .bind(roomId, actor.id),
-        db.prepare('DELETE FROM memberships WHERE room_id = ? AND member_id = ?')
-          .bind(roomId, ownerMemberId),
-        db.prepare(
-          "INSERT INTO memberships (room_id, member_id, user_id, role) VALUES (?, ?, ?, 'manager')"
-        ).bind(roomId, ownerMemberId, actor.id),
-        db.prepare(`
-          INSERT INTO settings (room_id, key, value) VALUES (?, ?, ?)
-          ON CONFLICT(room_id, key) DO UPDATE SET value = excluded.value
-        `).bind(roomId, 'admin_pin_hash', newHash),
-      ]);
-      await clearAuthFailures(db, key);
-      const session = await createUserSession(db, actor.id);
-      const ownerMember = await db.prepare('SELECT name FROM members WHERE id = ? AND room_id = ?')
-        .bind(ownerMemberId, roomId).first();
+      const member = await loadMember(db, roomId, ownerMemberId);
+      if (!member) return jsonResponse({ error: 'Hồ sơ chủ phòng không còn tồn tại.' }, 409);
+      const memberships = await rowsFor(
+        db,
+        'memberships',
+        (row) => row.room_id === roomId
+          && (row.user_id === current.user.id || row.member_id === ownerMemberId)
+      );
+      const writes = [
+        writeRow('rooms', { ...room, owner_member_id: ownerMemberId }),
+        writeRow('members', { ...member, is_active: 1 }),
+        ...memberships.map((row) => deleteRow('memberships', row)),
+        writeRow('memberships', {
+          room_id: roomId,
+          member_id: ownerMemberId,
+          user_id: current.user.id,
+          role: 'manager',
+          created_at: new Date().toISOString(),
+        }),
+      ];
+      if (newPin) {
+        writes.push(
+          writeRow('settings', {
+            room_id: roomId,
+            key: 'admin_pin_hash',
+            value: await sha256Hex(newPin),
+          })
+        );
+      }
+      await db.commit(writes);
+      await clearAuthFailures(db, throttleKey);
+      const session = await createUserSession(db, current.user.id);
       return jsonResponse({
         success: true,
         room_id: roomId,
         room_name: room.name,
         token: session.token,
         expires_at: session.expires_at,
-        user: actor,
+        user: {
+          id: current.user.id,
+          username: current.user.username,
+          display_name: current.user.display_name,
+          email: current.user.email || '',
+        },
         member_id: ownerMemberId,
-        member_name: ownerMember?.name || '',
+        member_name: member.name,
         role: 'owner',
       });
     }
@@ -668,9 +785,7 @@ export async function onRequest(context) {
     // ================= Cần phiên tài khoản =================
 
     const session = await readUserSession(db, request);
-    if (!session) {
-      return jsonResponse({ error: 'Chưa đăng nhập.', needs_auth: true }, 401);
-    }
+    if (!session) return jsonResponse({ error: 'Chưa đăng nhập.', needs_auth: true }, 401);
     if (session.err) {
       return jsonResponse({
         error: 'Phiên đã hết hạn, đăng nhập lại.',
@@ -680,94 +795,221 @@ export async function onRequest(context) {
     }
     const user = session.user;
 
-    // GET /api/auth/me - Tài khoản + danh sách phòng như "nhóm" trong app chat
-    // Không ghi last_seen_at ở đây: client gọi sau mỗi thao tác ghi, biến một lượt
-    // đọc thành một lượt ghi D1 trong khi chưa dùng tới cột đó.
     if (path === 'auth/me' && method === 'GET') {
-      const rows = await db.prepare(`
-        SELECT ms.room_id, ms.member_id, ms.role, m.name AS member_name,
-               r.name AS room_name, r.owner_member_id
-          FROM memberships ms
-          JOIN members m ON m.room_id = ms.room_id AND m.id = ms.member_id
-          JOIN rooms r ON r.room_id = ms.room_id
-         WHERE ms.user_id = ? AND m.is_active = 1
-         ORDER BY ms.created_at ASC, ms.rowid ASC
-      `).bind(user.id).all();
-      const rooms = (rows.results || []).map((row) => ({
-        room_id: row.room_id,
-        room_name: row.room_name || row.room_id,
-        member_id: row.member_id,
-        member_name: row.member_name,
-        role: row.owner_member_id === row.member_id ? 'owner' : normalizeRole(row.role),
-      }));
-      return jsonResponse({ user, rooms });
+      return jsonResponse(await authMeResponse(db, user));
     }
 
-    // POST /api/auth/logout
     if (path === 'auth/logout' && method === 'POST') {
-      await db.prepare('UPDATE user_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL')
-        .bind(new Date().toISOString(), session.tokenHash).run();
+      const activeSession = await db.get('user_sessions', session.tokenHash);
+      if (activeSession && !activeSession.revoked_at) {
+        await db.set('user_sessions', session.tokenHash, {
+          ...activeSession,
+          revoked_at: new Date().toISOString(),
+        });
+      }
       return jsonResponse({ success: true });
     }
 
-    // POST /api/auth/change-password { old_password, new_password }
-    if (path === 'auth/change-password' && method === 'POST') {
+    if (path === 'rooms/search' && method === 'GET') {
+      const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+      const allRooms = await db.list('rooms');
+      const activeRooms = allRooms.filter((r) => r.is_active !== 0);
+
+      // Lấy danh sách phòng người dùng đã tham gia
+      const myMemberships = await rowsFor(
+        db,
+        'memberships',
+        (row) => row.user_id === user.id
+      );
+      const joinedRoomIds = new Set(myMemberships.map((m) => m.room_id));
+
+      const results = [];
+      for (const room of activeRooms) {
+        const roomName = room.name || room.room_id || '';
+        const roomId = room.room_id;
+        if (query && !roomName.toLowerCase().includes(query) && !roomId.toLowerCase().includes(query)) {
+          continue;
+        }
+
+        // Lấy thông tin chủ phòng
+        let ownerName = 'Chủ phòng';
+        let ownerEmail = '';
+        if (room.owner_member_id) {
+          const ownerMember = await loadMember(db, roomId, room.owner_member_id);
+          if (ownerMember) {
+            ownerName = ownerMember.nickname || ownerMember.name || ownerName;
+            // Tìm user của owner nếu có
+            const ownerMembership = (await rowsFor(
+              db,
+              'memberships',
+              (row) => row.room_id === roomId && row.member_id === room.owner_member_id
+            ))[0];
+            if (ownerMembership) {
+              const ownerAccount = await db.get('users', ownerMembership.user_id);
+              if (ownerAccount) {
+                ownerEmail = ownerAccount.email || '';
+                ownerName = ownerAccount.display_name || ownerName;
+              }
+            }
+          }
+        }
+
+        results.push({
+          room_id: roomId,
+          room_name: roomName,
+          owner_name: ownerName,
+          owner_email: ownerEmail,
+          is_joined: joinedRoomIds.has(roomId),
+        });
+        if (results.length >= 20) break;
+      }
+      return jsonResponse({ rooms: results });
+    }
+
+    if (path === 'rooms/request-join' && method === 'POST') {
       const body = await request.json().catch(() => ({}));
-      const oldPassword = String(body.old_password || '');
-      const newPassword = String(body.new_password || '');
-      if (newPassword.length < 8 || newPassword.length > 128) {
-        return jsonResponse({ error: 'Mật khẩu mới cần 8–128 ký tự.' }, 400);
+      const targetRoomId = String(body.room_id || '').trim();
+      const targetRoom = await db.get('rooms', targetRoomId);
+      if (!targetRoom || targetRoom.is_active === 0) {
+        return jsonResponse({ error: 'Phòng không tồn tại hoặc đã ngưng hoạt động.' }, 404);
       }
-      const row = await db.prepare('SELECT password_hash FROM users WHERE id = ?').bind(user.id).first();
-      if (!row || !await verifyPassword(oldPassword, row.password_hash)) {
-        await sleep(200);
-        return jsonResponse({ error: 'Mật khẩu hiện tại không đúng.' }, 403);
+
+      // Kiểm tra xem đã là thành viên chưa
+      const myMemberships = await rowsFor(
+        db,
+        'memberships',
+        (row) => row.room_id === targetRoomId && row.user_id === user.id
+      );
+      if (myMemberships.length > 0) {
+        return jsonResponse({ error: 'Bạn đã là thành viên của phòng này rồi.', room_id: targetRoomId }, 409);
       }
-      await db.batch([
-        db.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-          .bind(await hashPassword(newPassword), user.id),
-        // Đổi mật khẩu = đá mọi máy khác, giữ đúng phiên đang dùng.
-        db.prepare('UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL')
-          .bind(new Date().toISOString(), user.id, session.tokenHash),
+
+      // Kiểm tra có yêu cầu đang pending không
+      const pending = await rowsFor(
+        db,
+        'join_requests',
+        (row) => row.room_id === targetRoomId && row.user_id === user.id && row.status === 'pending'
+      );
+      if (pending.length > 0) {
+        return jsonResponse({
+          success: true,
+          pending: true,
+          room_id: targetRoomId,
+          room_name: targetRoom.name,
+          message: 'Bạn đã gửi yêu cầu gia nhập trước đó, vui lòng chờ chủ phòng duyệt.',
+        });
+      }
+
+      // Tạo một member profile tạm cho user nếu chưa có
+      const memberId = randomId('mem');
+      const now = new Date().toISOString();
+      await db.commit([
+        writeRow('members', {
+          id: memberId,
+          room_id: targetRoomId,
+          name: user.display_name || user.email || 'Thành viên mới',
+          nickname: '',
+          weight: 1,
+          is_active: 1,
+          created_at: now,
+        }),
+        writeRow('join_requests', {
+          id: randomId('join'),
+          room_id: targetRoomId,
+          member_id: memberId,
+          user_id: user.id,
+          role: 'member',
+          status: 'pending',
+          created_at: now,
+          reviewed_at: null,
+        }),
       ]);
-      return jsonResponse({ success: true });
+
+      return jsonResponse({
+        success: true,
+        pending: true,
+        room_id: targetRoomId,
+        room_name: targetRoom.name,
+      });
     }
 
-    // POST /api/invites/claim { token }
     if (path === 'invites/claim' && method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const token = String(body.token || '');
       if (!INVITE_TOKEN_RE.test(token)) {
         return jsonResponse({ error: 'Link mời không hợp lệ.' }, 400);
       }
+      const tokenHash = await sha256Hex(token);
       const invite = await findInviteByToken(db, token);
-      if (!inviteUsable(invite)) {
-        return jsonResponse({ error: 'Link mời không còn hiệu lực.' }, 410);
-      }
-      if (!invite.is_active) {
-        return jsonResponse({ error: 'Thành viên này đã ngưng hoạt động.' }, 409);
-      }
-      const existing = await db.prepare('SELECT user_id FROM memberships WHERE room_id = ? AND member_id = ?')
-        .bind(invite.room_id, invite.member_id).first();
-      if (existing) {
+      if (!inviteUsable(invite)) return jsonResponse({ error: 'Link mời không còn hiệu lực.' }, 410);
+      if (!invite.is_active) return jsonResponse({ error: 'Thành viên này đã ngưng hoạt động.' }, 409);
+
+      const roomMemberships = await rowsFor(
+        db,
+        'memberships',
+        (row) => row.room_id === invite.room_id
+      );
+      if (roomMemberships.some((row) => row.member_id === invite.member_id)) {
         return jsonResponse({ error: 'Thành viên này đã có tài khoản rồi.' }, 409);
       }
+      if (roomMemberships.some((row) => row.user_id === user.id)) {
+        return jsonResponse({ error: 'Tài khoản đã là thành viên khác trong phòng này.' }, 409);
+      }
+
       const role = normalizeRole(invite.role);
-      let res;
-      try {
-        // PK (room_id, member_id) và UNIQUE (room_id, user_id) cùng chặn race.
-        res = await db.prepare(`
-          INSERT OR IGNORE INTO memberships (room_id, member_id, user_id, role)
-          VALUES (?, ?, ?, ?)
-        `).bind(invite.room_id, invite.member_id, user.id, role).run();
-      } catch (err) {
-        return jsonResponse({ error: 'Tài khoản đã là thành viên phòng này.' }, 409);
+      const requiresApproval = invite.join_approval !== '0';
+      if (requiresApproval) {
+        const existing = await rowsFor(
+          db,
+          'join_requests',
+          (row) => row.room_id === invite.room_id
+            && row.member_id === invite.member_id
+            && row.user_id === user.id
+            && row.status === 'pending'
+        );
+        if (existing.length) {
+          await db.delete('invites', tokenHash);
+          return jsonResponse({
+            success: true,
+            pending: true,
+            room_id: invite.room_id,
+            room_name: invite.room_name || invite.room_id,
+          });
+        }
+        await db.commit([
+          writeRow('join_requests', {
+            id: randomId('join'),
+            room_id: invite.room_id,
+            member_id: invite.member_id,
+            user_id: user.id,
+            role,
+            status: 'pending',
+            created_at: new Date().toISOString(),
+            reviewed_at: null,
+          }),
+          deleteRow('invites', invite),
+        ]);
+        return jsonResponse({
+          success: true,
+          pending: true,
+          room_id: invite.room_id,
+          room_name: invite.room_name || invite.room_id,
+        });
       }
-      if ((res.meta?.changes ?? 0) === 0) {
-        return jsonResponse({ error: 'Không nhận được link: thành viên đã có chủ hoặc tài khoản đã ở phòng này.' }, 409);
-      }
-      await db.prepare('DELETE FROM invites WHERE room_id = ? AND member_id = ?')
-        .bind(invite.room_id, invite.member_id).run();
+
+      await db.commit([
+        writeRow('memberships', {
+          room_id: invite.room_id,
+          member_id: invite.member_id,
+          user_id: user.id,
+          role,
+          created_at: new Date().toISOString(),
+        }),
+        ...roomMemberships
+          .filter((row) => row.member_id === invite.member_id)
+          .map((row) => deleteRow('memberships', row)),
+        deleteRow('invites', invite),
+      ]);
       return jsonResponse({
         success: true,
         room_id: invite.room_id,
@@ -778,17 +1020,12 @@ export async function onRequest(context) {
       });
     }
 
-    // POST /api/rooms { name, pin, owner_name? }
     if (path === 'rooms' && method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const name = String(body.name || '').trim().slice(0, 40);
       const pin = String(body.pin || '');
-      if (name.length < 2) {
-        return jsonResponse({ error: 'Tên phòng cần ít nhất 2 ký tự.' }, 400);
-      }
-      if (!PIN_RE.test(pin)) {
-        return jsonResponse({ error: 'Mã khôi phục cần 6–12 chữ số.' }, 400);
-      }
+      if (name.length < 2) return jsonResponse({ error: 'Tên phòng cần ít nhất 2 ký tự.' }, 400);
+      if (!PIN_RE.test(pin)) return jsonResponse({ error: 'Mã khôi phục cần 6–12 chữ số.' }, 400);
       const base = slugify(name);
       if (!base) return jsonResponse({ error: 'Tên phòng không tạo được mã slug.' }, 400);
       const roomId = await uniqueSlug(db, base);
@@ -796,23 +1033,34 @@ export async function onRequest(context) {
 
       const ownerName = String(body.owner_name || '').trim().slice(0, 60) || user.display_name;
       const ownerId = randomId('mem');
-      await db.batch([
-        db.prepare('INSERT INTO rooms (room_id, name, owner_member_id) VALUES (?, ?, ?)')
-          .bind(roomId, name, ownerId),
-        db.prepare('INSERT INTO members (id, room_id, name, nickname, is_active) VALUES (?, ?, ?, ?, 1)')
-          .bind(ownerId, roomId, ownerName, ownerName.split(' ').pop()),
-        db.prepare(
-          "INSERT INTO memberships (room_id, member_id, user_id, role) VALUES (?, ?, ?, 'manager')"
-        ).bind(roomId, ownerId, user.id),
-        db.prepare('INSERT INTO settings (room_id, key, value) VALUES (?, ?, ?)')
-          .bind(roomId, 'room_name', name),
-        db.prepare('INSERT INTO settings (room_id, key, value) VALUES (?, ?, ?)')
-          .bind(roomId, 'admin_pin_hash', await sha256Hex(pin)),
-        db.prepare('INSERT INTO settings (room_id, key, value) VALUES (?, ?, ?)')
-          .bind(roomId, 'transfer_prefix', 'TIEN PHONG'),
-        // Mã phòng đi TRƯỚC tên người trong nội dung CK: ngân hàng cắt từ đuôi.
-        db.prepare('INSERT INTO settings (room_id, key, value) VALUES (?, ?, ?)')
-          .bind(roomId, 'transfer_code', deriveTransferCode(roomId)),
+      const now = new Date().toISOString();
+      const room = { room_id: roomId, name, owner_member_id: ownerId, created_at: now };
+      const ownerMember = {
+        id: ownerId,
+        room_id: roomId,
+        name: ownerName,
+        nickname: ownerName.split(' ').pop(),
+        phone: null,
+        is_active: 1,
+        created_at: now,
+      };
+      await db.commit([
+        writeRow('rooms', room),
+        writeRow('members', ownerMember),
+        writeRow('memberships', {
+          room_id: roomId,
+          member_id: ownerId,
+          user_id: user.id,
+          role: 'manager',
+          created_at: now,
+        }),
+        ...[
+          ['room_name', name],
+          ['admin_pin_hash', await sha256Hex(pin)],
+          ['transfer_prefix', 'TIEN PHONG'],
+          ['transfer_code', deriveTransferCode(roomId)],
+          ['join_approval', '1'],
+        ].map(([key, value]) => writeRow('settings', { room_id: roomId, key, value })),
       ]);
       return jsonResponse({
         success: true,
@@ -826,99 +1074,40 @@ export async function onRequest(context) {
       });
     }
 
-    // ================= Trong một phòng =================
-
     const roomResolve = resolveRoomId(url, null);
     if (roomResolve.error && path !== 'auth/me' && path !== 'auth/logout') {
       return jsonResponse({ error: roomResolve.error }, 400);
     }
     const roomId = roomResolve.roomId;
 
-    // GET /api/data?p=room
     if (path === 'data' && method === 'GET') {
       const gate = await roomGate(db, user, roomId, 'viewer');
       if (gate.response) return gate.response;
-
-      // batch = một round trip D1 cho cả 5 lượt đọc, thay vì 5 query song song.
-      const [settingsRes, membersRes, periodsRes, expensesRes, sharesRes] = await db.batch([
-        db.prepare('SELECT key, value FROM settings WHERE room_id = ?').bind(roomId),
-        db.prepare(`
-          SELECT m.id, m.name, m.nickname, m.phone, m.is_active, m.created_at,
-                 ms.role AS role, ms.user_id AS user_id
-            FROM members m
-            LEFT JOIN memberships ms ON ms.room_id = m.room_id AND ms.member_id = m.id
-           WHERE m.room_id = ?
-           ORDER BY m.created_at ASC, m.rowid ASC
-        `).bind(roomId),
-        db.prepare('SELECT * FROM periods WHERE room_id = ? ORDER BY id DESC').bind(roomId),
-        db.prepare('SELECT * FROM expenses WHERE room_id = ? ORDER BY expense_date DESC, created_at DESC')
-          .bind(roomId),
-        db.prepare('SELECT * FROM member_shares WHERE room_id = ?').bind(roomId),
-      ]);
-
-      const settings = {};
-      for (const row of settingsRes.results || []) {
-        if (row.key !== 'admin_pin_hash') settings[row.key] = row.value;
-      }
-      // SĐT chỉ trả cho chính người đó hoặc manager trở lên.
-      const canSeePhone = ROLE_RANK[gate.role] >= ROLE_RANK.manager;
-      const members = (membersRes.results || []).map((m) => ({
-        id: m.id,
-        name: m.name,
-        nickname: m.nickname,
-        phone: canSeePhone || m.id === gate.member.id ? m.phone : null,
-        is_active: m.is_active,
-        created_at: m.created_at,
-        role: m.id === gate.room.owner_member_id ? 'owner' : (m.role || null),
-        has_account: !!m.user_id,
-      }));
-
-      return jsonResponse({
-        hasD1: true,
-        room_id: roomId,
-        room_name: gate.room.name,
-        owner_member_id: gate.room.owner_member_id || null,
-        me: {
-          member_id: gate.member.id,
-          name: gate.member.name,
-          nickname: gate.member.nickname,
-          role: gate.role,
-          is_owner: gate.isOwner,
-        },
-        settings,
-        members,
-        periods: periodsRes.results || [],
-        expenses: expensesRes.results || [],
-        member_shares: sharesRes.results || [],
-      });
+      return jsonResponse(await dataForRoom(db, gate, roomId));
     }
 
-    // POST /api/member/toggle-share-paid { period_id, is_paid, paid_amount? }
-    // member_id lấy từ phiên: không tick hộ người khác được. viewer bị chặn bởi rank.
     if (path === 'member/toggle-share-paid' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'member');
       if (gate.response) return gate.response;
       const body = await request.json().catch(() => ({}));
       const periodId = String(body.period_id || '');
       if (!/^\d{4}-\d{2}$/.test(periodId)) return jsonResponse({ error: 'Kỳ không hợp lệ.' }, 400);
-      const memberId = gate.member.id;
       const isPaid = !!body.is_paid;
       const paidAt = isPaid ? new Date().toISOString() : null;
-      const paidInt = body.paid_amount === undefined || body.paid_amount === null
+      const paidAmount = body.paid_amount === undefined || body.paid_amount === null
         ? null
         : Math.max(0, parseInt(body.paid_amount, 10) || 0);
-      await db.prepare(`
-        INSERT INTO member_shares (room_id, period_id, member_id, amount, is_paid, paid_at, note, paid_amount)
-        VALUES (?, ?, ?, 0, ?, ?, '', COALESCE(?, 0))
-        ON CONFLICT(room_id, period_id, member_id) DO UPDATE SET
-          is_paid = excluded.is_paid,
-          paid_at = excluded.paid_at,
-          paid_amount = COALESCE(?, member_shares.paid_amount)
-      `).bind(roomId, periodId, memberId, isPaid ? 1 : 0, paidAt, paidInt, paidInt).run();
-      return jsonResponse({ success: true, member_id: memberId, is_paid: isPaid, paid_at: paidAt });
+      await upsertShare(db, roomId, periodId, gate.member.id, isPaid, paidAt, paidAmount);
+      const actionName = isPaid ? 'đã thanh toán' : (paidAmount ? `đã thanh toán ${paidAmount.toLocaleString('vi-VN')} ₫` : 'đã hủy thanh toán');
+      await logActivity(db, roomId, gate.member.nickname || gate.member.name, 'payment', `${gate.member.nickname || gate.member.name} ${actionName} kỳ ${periodId}`);
+      return jsonResponse({
+        success: true,
+        member_id: gate.member.id,
+        is_paid: isPaid,
+        paid_at: paidAt,
+      });
     }
 
-    // POST /api/rooms/leave - tự rời, giữ lịch sử tiền, chủ phòng phải giao trước
     if (path === 'rooms/leave' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'viewer');
       if (gate.response) return gate.response;
@@ -928,91 +1117,85 @@ export async function onRequest(context) {
       return jsonResponse({ success: true, room_id: roomId, member_id: gate.member.id, left: true });
     }
 
-    // POST /api/admin/settings { key: value ... } - chủ phòng
     if (path === 'admin/settings' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'owner');
       if (gate.response) return gate.response;
       const body = await request.json().catch(() => ({}));
-      const statements = [];
+      const writes = [];
       for (const key of SETTINGS_WRITE_KEYS) {
-        const value = body[key];
-        if (value === undefined || value === null) continue;
-        statements.push(
-          db.prepare(`
-            INSERT INTO settings (room_id, key, value) VALUES (?, ?, ?)
-            ON CONFLICT(room_id, key) DO UPDATE SET value = excluded.value
-          `).bind(roomId, key, String(value))
-        );
+        if (body[key] === undefined || body[key] === null) continue;
+        const existing = await db.get('settings', [roomId, key]);
+        writes.push(writeRow('settings', {
+          ...existing,
+          room_id: roomId,
+          key,
+          value: String(body[key]),
+        }));
       }
       if (body.room_name !== undefined) {
         const roomName = String(body.room_name).trim().slice(0, 40);
         if (roomName.length >= 2) {
-          statements.push(
-            db.prepare('UPDATE rooms SET name = ? WHERE room_id = ?').bind(roomName, roomId)
-          );
+          writes.push(writeRow('rooms', { ...gate.room, name: roomName }));
         }
       }
-      if (statements.length > 0) await db.batch(statements);
+      await db.commit(writes);
       return jsonResponse({ success: true, message: 'Đã cập nhật cài đặt!' });
     }
 
-    // POST /api/admin/pin { new_pin } - đổi mã khôi phục của phòng (chủ phòng)
     if (path === 'admin/pin' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'owner');
       if (gate.response) return gate.response;
       const body = await request.json().catch(() => ({}));
       const newPin = String(body.new_pin || '');
-      if (!PIN_RE.test(newPin)) {
-        return jsonResponse({ error: 'Mã khôi phục cần 6–12 chữ số.' }, 400);
-      }
-      await db.prepare(`
-        INSERT INTO settings (room_id, key, value) VALUES (?, ?, ?)
-        ON CONFLICT(room_id, key) DO UPDATE SET value = excluded.value
-      `).bind(roomId, 'admin_pin_hash', await sha256Hex(newPin)).run();
+      if (!PIN_RE.test(newPin)) return jsonResponse({ error: 'Mã khôi phục cần 6–12 chữ số.' }, 400);
+      await db.set('settings', [roomId, 'admin_pin_hash'], {
+        room_id: roomId,
+        key: 'admin_pin_hash',
+        value: await sha256Hex(newPin),
+      });
       return jsonResponse({ success: true });
     }
 
-    // POST /api/admin/members { id?, name, nickname?, phone? } - manager+
     if (path === 'admin/members' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'manager');
       if (gate.response) return gate.response;
-      const m = await request.json().catch(() => ({}));
-      const name = String(m.name || '').trim().slice(0, 60);
-      const nickname = String(m.nickname || '').trim().slice(0, 40);
-      const phone = String(m.phone || '').trim().slice(0, 20);
-
-      if (m.id) {
-        const id = String(m.id);
+      const body = await request.json().catch(() => ({}));
+      const name = String(body.name || '').trim().slice(0, 60);
+      const nickname = String(body.nickname || '').trim().slice(0, 40);
+      const phone = String(body.phone || '').trim().slice(0, 20);
+      if (body.id) {
+        const id = String(body.id);
         const target = await loadMember(db, roomId, id);
         if (!target) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
         if (name.length < 1) return jsonResponse({ error: 'Tên thành viên không được trống.' }, 400);
-        await db.prepare('UPDATE members SET name = ?, nickname = ?, phone = ? WHERE id = ? AND room_id = ?')
-          .bind(name, nickname, phone, id, roomId).run();
+        await db.set('members', id, { ...target, name, nickname, phone });
         return jsonResponse({ success: true, id });
       }
-
       if (name.length < 2) return jsonResponse({ error: 'Tên thành viên cần ít nhất 2 ký tự.' }, 400);
       const id = randomId('mem');
-      await db.prepare('INSERT INTO members (id, room_id, name, nickname, phone, is_active) VALUES (?, ?, ?, ?, ?, 1)')
-        .bind(id, roomId, name, nickname, phone).run();
+      await db.set('members', id, {
+        id,
+        room_id: roomId,
+        name,
+        nickname,
+        phone,
+        is_active: 1,
+        created_at: new Date().toISOString(),
+      });
       return jsonResponse({ success: true, id });
     }
 
-    // POST /api/admin/members/:id/(deactivate|reactivate|role|unlink)
     const memberAction = /^admin\/members\/([^/]+)\/(deactivate|reactivate|role|unlink)$/.exec(path);
     if (memberAction && method === 'POST') {
-      const targetId = memberAction[1];
-      const action = memberAction[2];
+      const [, targetId, action] = memberAction;
       const minRole = action === 'deactivate' || action === 'reactivate' ? 'manager' : 'owner';
       const gate = await roomGate(db, user, roomId, minRole);
       if (gate.response) return gate.response;
-
       const target = await loadMember(db, roomId, targetId);
       if (!target) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
-      const ownerId = gate.room.owner_member_id;
-      const targetRank = await memberRank(db, roomId, targetId, ownerId);
+      const targetRank = await memberRank(db, roomId, targetId, gate.room.owner_member_id);
       if (targetRank >= ROLE_RANK[gate.role]) {
-        return jsonResponse({ error: 'Không thao tác được trên người ngang hoặc cao quyền hơn.', room_id: roomId }, 403);
+        return jsonResponse({ error: 'Không thao tác được trên người ngang hoặc cao quyền hơn.' }, 403);
       }
 
       if (action === 'deactivate') {
@@ -1021,141 +1204,149 @@ export async function onRequest(context) {
         await deactivateMember(db, roomId, targetId);
         return jsonResponse({ success: true, member_id: targetId, is_active: 0 });
       }
-
       if (action === 'reactivate') {
-        await db.prepare('UPDATE members SET is_active = 1 WHERE id = ? AND room_id = ?')
-          .bind(targetId, roomId).run();
+        await db.set('members', targetId, { ...target, is_active: 1 });
         return jsonResponse({ success: true, member_id: targetId, is_active: 1 });
       }
 
+      const memberships = await rowsFor(
+        db,
+        'memberships',
+        (row) => row.room_id === roomId && row.member_id === targetId
+      );
       if (action === 'role') {
         const body = await request.json().catch(() => ({}));
         const role = String(body.role || '');
         if (!INVITE_ROLES.includes(role)) return jsonResponse({ error: 'Quyền không hợp lệ.' }, 400);
-        const membership = await db.prepare('SELECT user_id FROM memberships WHERE room_id = ? AND member_id = ?')
-          .bind(roomId, targetId).first();
-        if (!membership) {
+        if (!memberships.length) {
           return jsonResponse({ error: 'Thành viên chưa có tài khoản, chưa đặt được quyền.' }, 409);
         }
-        await db.prepare('UPDATE memberships SET role = ? WHERE room_id = ? AND member_id = ?')
-          .bind(role, roomId, targetId).run();
+        await writeRows(db, 'memberships', memberships.map((row) => ({ ...row, role })));
         return jsonResponse({ success: true, member_id: targetId, role });
       }
-
-      // unlink: gỡ liên kết tài khoản. Người đó quay về "chưa có tài khoản" và nhận
-      // quyền lại bằng link claim mới; lịch sử tiền của member row không đổi.
-      const removed = await db.prepare('DELETE FROM memberships WHERE room_id = ? AND member_id = ?')
-        .bind(roomId, targetId).run();
-      await db.prepare('DELETE FROM invites WHERE room_id = ? AND member_id = ?')
-        .bind(roomId, targetId).run();
-      return jsonResponse({ success: true, member_id: targetId, unlinked: (removed.meta?.changes ?? 0) > 0 });
+      const invites = await rowsFor(
+        db,
+        'invites',
+        (row) => row.room_id === roomId && row.member_id === targetId
+      );
+      await db.commit([
+        ...memberships.map((row) => deleteRow('memberships', row)),
+        ...invites.map((row) => deleteRow('invites', row)),
+      ]);
+      return jsonResponse({ success: true, member_id: targetId, unlinked: memberships.length > 0 });
     }
 
-    // POST /api/admin/periods
     if (path === 'admin/periods' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'manager');
       if (gate.response) return gate.response;
-      const p = await request.json().catch(() => ({}));
-      const id = String(p.id || 'period_' + Date.now());
-      await db.prepare(`
-        INSERT INTO periods (room_id, id, title, due_date, status)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(room_id, id) DO UPDATE SET
-          title = excluded.title,
-          due_date = excluded.due_date,
-          status = excluded.status
-      `).bind(roomId, id, p.title, p.due_date || '', p.status || 'open').run();
+      const body = await request.json().catch(() => ({}));
+      const id = String(body.id || `period_${Date.now()}`);
+      const key = [roomId, id];
+      const existing = await db.get('periods', key);
+      await db.set('periods', key, {
+        ...existing,
+        room_id: roomId,
+        id,
+        title: body.title,
+        due_date: body.due_date || '',
+        status: body.status || 'open',
+        created_at: existing?.created_at || new Date().toISOString(),
+      });
       return jsonResponse({ success: true, id });
     }
 
-    // DELETE /api/admin/periods/:id - xóa kỳ kéo theo khoản + shares, chỉ chủ phòng
     if (path.startsWith('admin/periods/') && method === 'DELETE') {
       const gate = await roomGate(db, user, roomId, 'owner');
       if (gate.response) return gate.response;
       const id = path.split('/')[2];
-      await db.batch([
-        db.prepare('DELETE FROM periods WHERE id = ? AND room_id = ?').bind(id, roomId),
-        db.prepare('DELETE FROM expenses WHERE period_id = ? AND room_id = ?').bind(id, roomId),
-        db.prepare('DELETE FROM member_shares WHERE period_id = ? AND room_id = ?').bind(id, roomId),
+      const [period, expenses, shares] = await Promise.all([
+        db.get('periods', [roomId, id]),
+        rowsFor(db, 'expenses', (row) => row.room_id === roomId && row.period_id === id),
+        rowsFor(db, 'member_shares', (row) => row.room_id === roomId && row.period_id === id),
+      ]);
+      await db.commit([
+        ...(period ? [deleteRow('periods', period)] : []),
+        ...expenses.map((row) => deleteRow('expenses', row)),
+        ...shares.map((row) => deleteRow('member_shares', row)),
       ]);
       return jsonResponse({ success: true });
     }
 
-    // POST /api/admin/expenses
     if (path === 'admin/expenses' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'manager');
       if (gate.response) return gate.response;
-      const exp = await request.json().catch(() => ({}));
-      const id = String(exp.id || ('exp_' + Date.now()));
-
-      const dateStr = String(exp.expense_date || new Date().toISOString().split('T')[0]);
-      const parts = dateStr.split('-');
-      const year = parts[0] || '2026';
-      const month = parts[1] || '10';
-      const periodId = String(exp.period_id || `${year}-${month}`);
-
-      const targetMemberId = exp.target_member_id ? String(exp.target_member_id) : null;
-      if (targetMemberId) {
-        const known = await db.prepare('SELECT id FROM members WHERE id = ? AND room_id = ?')
-          .bind(targetMemberId, roomId).first();
-        if (!known) return jsonResponse({ error: 'Người nhận khoản không thuộc phòng này.' }, 400);
+      const expense = await request.json().catch(() => ({}));
+      const id = String(expense.id || `exp_${Date.now()}`);
+      const dateStr = String(expense.expense_date || new Date().toISOString().split('T')[0]);
+      const [year = '2026', month = '10'] = dateStr.split('-');
+      const periodId = String(expense.period_id || `${year}-${month}`);
+      const targetMemberId = expense.target_member_id ? String(expense.target_member_id) : null;
+      if (targetMemberId && !await loadMember(db, roomId, targetMemberId)) {
+        return jsonResponse({ error: 'Người nhận khoản không thuộc phòng này.' }, 400);
       }
 
-      await db.prepare(
-        "INSERT OR IGNORE INTO periods (room_id, id, title, due_date, status) VALUES (?, ?, ?, '', 'open')"
-      ).bind(roomId, periodId, `Tháng ${month}/${year}`).run();
-
-      const category = String(exp.category || 'khac');
-      const title = String(exp.title || 'Khoản chi');
-      const amount = parseInt(exp.amount, 10) || 0;
-      const note = String(exp.note || '');
-      const quantity = exp.quantity != null ? parseInt(exp.quantity, 10) : null;
-      const unitPrice = exp.unit_price != null ? parseInt(exp.unit_price, 10) : null;
-      let splitConfig = null;
-      if (exp.split_config !== undefined && exp.split_config !== null && exp.split_config !== '') {
-        splitConfig = typeof exp.split_config === 'string' ? exp.split_config : JSON.stringify(exp.split_config);
+      const [existingPeriod, existingExpense] = await Promise.all([
+        db.get('periods', [roomId, periodId]),
+        db.get('expenses', id),
+      ]);
+      if (existingExpense && existingExpense.room_id !== roomId) {
+        return jsonResponse({ error: 'Khoản chi này thuộc phòng khác.', room_id: roomId }, 409);
       }
-
-      try {
-        const res = await db.prepare(`
-          INSERT INTO expenses (id, room_id, period_id, category, title, amount, note, expense_date, target_member_id, quantity, unit_price, split_config)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            room_id = excluded.room_id,
-            period_id = excluded.period_id,
-            category = excluded.category,
-            title = excluded.title,
-            amount = excluded.amount,
-            note = excluded.note,
-            expense_date = excluded.expense_date,
-            target_member_id = excluded.target_member_id,
-            quantity = excluded.quantity,
-            unit_price = excluded.unit_price,
-            split_config = excluded.split_config
-          WHERE expenses.room_id = excluded.room_id
-        `).bind(
-          id, roomId, periodId, category, title, amount, note, dateStr,
-          targetMemberId, quantity, unitPrice, splitConfig
-        ).run();
-        if ((res.meta?.changes ?? 0) === 0) {
-          return jsonResponse({ error: 'Khoản chi này thuộc phòng khác.', room_id: roomId }, 409);
-        }
-      } catch (err) {
-        return jsonResponse({ error: 'Lỗi lưu chi tiêu: ' + String(err?.message || err) }, 500);
-      }
+      const category = String(expense.category || 'khac');
+      const title = String(expense.title || 'Khoản chi');
+      const splitConfig = expense.split_config === undefined
+        || expense.split_config === null
+        || expense.split_config === ''
+        ? null
+        : (typeof expense.split_config === 'string'
+          ? expense.split_config
+          : JSON.stringify(expense.split_config));
+      const record = {
+        ...existingExpense,
+        id,
+        room_id: roomId,
+        period_id: periodId,
+        category,
+        title,
+        amount: parseInt(expense.amount, 10) || 0,
+        note: String(expense.note || ''),
+        expense_date: dateStr,
+        target_member_id: targetMemberId,
+        quantity: expense.quantity != null ? parseInt(expense.quantity, 10) : null,
+        unit_price: expense.unit_price != null ? parseInt(expense.unit_price, 10) : null,
+        split_config: splitConfig,
+        created_at: existingExpense?.created_at || new Date().toISOString(),
+      };
+      await db.commit([
+        ...(!existingPeriod ? [writeRow('periods', {
+          room_id: roomId,
+          id: periodId,
+          title: `Tháng ${month}/${year}`,
+          due_date: '',
+          status: 'open',
+          created_at: new Date().toISOString(),
+        })] : []),
+        writeRow('expenses', record),
+      ]);
+      const actorName = gate.member.nickname || gate.member.name;
+      const act = existingExpense ? 'cập nhật khoản chi' : 'thêm khoản chi';
+      await logActivity(db, roomId, actorName, 'expense', `${actorName} ${act} "${record.title}" (${(record.amount || 0).toLocaleString('vi-VN')} ₫)`);
       return jsonResponse({ success: true, id, period_id: periodId });
     }
 
-    // DELETE /api/admin/expenses/:id
     if (path.startsWith('admin/expenses/') && method === 'DELETE') {
       const gate = await roomGate(db, user, roomId, 'manager');
       if (gate.response) return gate.response;
       const id = path.split('/')[2];
-      await db.prepare('DELETE FROM expenses WHERE id = ? AND room_id = ?').bind(id, roomId).run();
+      const expense = await db.get('expenses', id);
+      if (expense?.room_id === roomId) {
+        await db.delete('expenses', id);
+        const actorName = gate.member.nickname || gate.member.name;
+        await logActivity(db, roomId, actorName, 'expense_delete', `${actorName} đã xóa khoản chi "${expense.title}" (${(expense.amount || 0).toLocaleString('vi-VN')} ₫)`);
+      }
       return jsonResponse({ success: true });
     }
 
-    // POST /api/admin/toggle-share-paid { period_id, member_id, is_paid, paid_amount? }
     if (path === 'admin/toggle-share-paid' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'manager');
       if (gate.response) return gate.response;
@@ -1163,59 +1354,148 @@ export async function onRequest(context) {
       const periodId = String(body.period_id || '');
       const memberId = String(body.member_id || '');
       if (!/^\d{4}-\d{2}$/.test(periodId)) return jsonResponse({ error: 'Kỳ không hợp lệ.' }, 400);
-      const known = await db.prepare('SELECT id FROM members WHERE id = ? AND room_id = ?')
-        .bind(memberId, roomId).first();
-      if (!known) return jsonResponse({ error: 'Thành viên không thuộc phòng này.' }, 400);
+      if (!await loadMember(db, roomId, memberId)) {
+        return jsonResponse({ error: 'Thành viên không thuộc phòng này.' }, 400);
+      }
       const isPaid = !!body.is_paid;
       const paidAt = isPaid ? new Date().toISOString() : null;
-      const paidInt = body.paid_amount === undefined || body.paid_amount === null
+      const paidAmount = body.paid_amount === undefined || body.paid_amount === null
         ? null
         : Math.max(0, parseInt(body.paid_amount, 10) || 0);
-      await db.prepare(`
-        INSERT INTO member_shares (room_id, period_id, member_id, amount, is_paid, paid_at, note, paid_amount)
-        VALUES (?, ?, ?, 0, ?, ?, '', COALESCE(?, 0))
-        ON CONFLICT(room_id, period_id, member_id) DO UPDATE SET
-          is_paid = excluded.is_paid,
-          paid_at = excluded.paid_at,
-          paid_amount = COALESCE(?, member_shares.paid_amount)
-      `).bind(roomId, periodId, memberId, isPaid ? 1 : 0, paidAt, paidInt, paidInt).run();
+      await upsertShare(db, roomId, periodId, memberId, isPaid, paidAt, paidAmount);
+      const targetMember = await loadMember(db, roomId, memberId);
+      const targetName = targetMember ? (targetMember.nickname || targetMember.name) : 'thành viên';
+      const actorName = gate.member.nickname || gate.member.name;
+      const actionName = isPaid ? 'đánh dấu đã nộp đủ' : (paidAmount ? `ghi nhận thu ${paidAmount.toLocaleString('vi-VN')} ₫` : 'xóa/hủy thanh toán');
+      await logActivity(db, roomId, actorName, 'payment', `${actorName} ${actionName} cho ${targetName} kỳ ${periodId}`);
       return jsonResponse({ success: true, is_paid: isPaid, paid_at: paidAt });
     }
 
-    // POST /api/admin/invites { member_id, role?, ttl_min? }
+    if (path === 'admin/join-requests' && method === 'GET') {
+      const gate = await roomGate(db, user, roomId, 'owner');
+      if (gate.response) return gate.response;
+      const joinRequests = await rowsFor(
+        db,
+        'join_requests',
+        (row) => row.room_id === roomId && row.status === 'pending'
+      );
+      const requests = [];
+      for (const row of joinRequests) {
+        const [member, account] = await Promise.all([
+          loadMember(db, roomId, row.member_id),
+          db.get('users', row.user_id),
+        ]);
+        if (member && account) {
+          requests.push({
+            id: row.id,
+            member_id: row.member_id,
+            user_id: row.user_id,
+            role: row.role,
+            created_at: row.created_at,
+            member_name: member.name,
+            display_name: account.display_name,
+            email: account.email,
+          });
+        }
+      }
+      requests.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+      return jsonResponse({ requests });
+    }
+
+    const joinDecisionMatch = /^admin\/join-requests\/([^/]+)\/(approve|reject)$/.exec(path);
+    if (joinDecisionMatch && method === 'POST') {
+      const gate = await roomGate(db, user, roomId, 'owner');
+      if (gate.response) return gate.response;
+      const [, requestId, decision] = joinDecisionMatch;
+      const joinRequest = await db.get('join_requests', requestId);
+      if (
+        !joinRequest
+        || joinRequest.room_id !== roomId
+        || joinRequest.status !== 'pending'
+      ) {
+        return jsonResponse({ error: 'Yêu cầu không còn chờ duyệt.' }, 404);
+      }
+      const reviewedAt = new Date().toISOString();
+      if (decision === 'reject') {
+        await db.set('join_requests', requestId, {
+          ...joinRequest,
+          status: 'rejected',
+          reviewed_at: reviewedAt,
+        });
+        return jsonResponse({ success: true, rejected: true });
+      }
+      const member = await loadMember(db, roomId, joinRequest.member_id);
+      if (!member?.is_active) {
+        return jsonResponse({ error: 'Thành viên đã ngưng hoạt động; không thể duyệt.' }, 409);
+      }
+      const roomMemberships = await rowsFor(
+        db,
+        'memberships',
+        (row) => row.room_id === roomId
+      );
+      if (roomMemberships.some((row) =>
+        row.member_id === joinRequest.member_id || row.user_id === joinRequest.user_id
+      )) {
+        return jsonResponse({
+          error: 'Không thể duyệt: tài khoản hoặc thành viên đã được liên kết với hồ sơ khác trong phòng.',
+        }, 409);
+      }
+      await db.commit([
+        writeRow('memberships', {
+          room_id: roomId,
+          member_id: joinRequest.member_id,
+          user_id: joinRequest.user_id,
+          role: normalizeRole(joinRequest.role),
+          created_at: reviewedAt,
+        }),
+        writeRow('join_requests', {
+          ...joinRequest,
+          status: 'approved',
+          reviewed_at: reviewedAt,
+        }),
+      ]);
+      return jsonResponse({ success: true, approved: true, member_id: joinRequest.member_id });
+    }
+
     if (path === 'admin/invites' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'manager');
       if (gate.response) return gate.response;
       return mintInvite(db, roomId, gate, await request.json().catch(() => ({})));
     }
 
-    // POST /api/admin/transfer-owner { member_id } - người nhận phải active VÀ có tài khoản
     if (path === 'admin/transfer-owner' && method === 'POST') {
       const gate = await roomGate(db, user, roomId, 'owner');
       if (gate.response) return gate.response;
       const body = await request.json().catch(() => ({}));
       const memberId = String(body.member_id || '');
       const target = await loadMember(db, roomId, memberId);
-      if (!target) return jsonResponse({ error: 'Thành viên không thuộc phòng này.', room_id: roomId }, 404);
+      if (!target) return jsonResponse({ error: 'Thành viên không thuộc phòng này.' }, 404);
       if (!target.is_active) {
         return jsonResponse({ error: 'Không giao phòng cho người đã ngưng hoạt động.' }, 409);
       }
-      const bound = await db.prepare('SELECT user_id FROM memberships WHERE room_id = ? AND member_id = ?')
-        .bind(roomId, memberId).first();
-      if (!bound) {
-        return jsonResponse({ error: 'Người này chưa có tài khoản nên không đăng nhập nhận phòng được. Gửi link mời trước.' }, 409);
+      const memberships = await rowsFor(
+        db,
+        'memberships',
+        (row) => row.room_id === roomId
+      );
+      const targetMembership = memberships.find((row) => row.member_id === memberId);
+      if (!targetMembership) {
+        return jsonResponse({
+          error: 'Người này chưa có tài khoản nên không đăng nhập nhận phòng được. Gửi link mời trước.',
+        }, 409);
       }
-      await db.batch([
-        db.prepare('UPDATE rooms SET owner_member_id = ? WHERE room_id = ?').bind(memberId, roomId),
-        // Chủ cũ hạ về manager để không mất quyền quản trị trong phòng.
-        db.prepare("UPDATE memberships SET role = 'manager' WHERE room_id = ? AND member_id = ?")
-          .bind(roomId, gate.member.id),
+      const currentMembership = memberships.find((row) => row.member_id === gate.member.id);
+      if (!currentMembership) return jsonResponse({ error: 'Không tìm thấy quyền chủ hiện tại.' }, 409);
+      await db.commit([
+        writeRow('rooms', { ...gate.room, owner_member_id: memberId }),
+        writeRow('memberships', { ...currentMembership, role: 'manager' }),
       ]);
       return jsonResponse({ success: true, room_id: roomId, owner_member_id: memberId });
     }
 
     return jsonResponse({ error: 'Endpoint không tồn tại' }, 404);
   } catch (error) {
+    console.error('Firestore-backed API failed', { path, message: error?.message });
     return jsonResponse({ error: error?.message || 'Lỗi máy chủ' }, 500);
   }
 }

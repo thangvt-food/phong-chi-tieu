@@ -6,15 +6,22 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:firebase-auth": "node --test scripts/firebase-auth.test.js",
+    "test:firestore": "node --test scripts/firestore.test.js",
+    "test": "npm run test:firebase-auth && npm run test:firestore",
     "preview": "vite preview",
     "pages:dev": "wrangler pages dev dist",
     "dev:server": "wrangler pages dev dist --port 8788",
     "dev:full": "concurrently -n web,api -c green,magenta \"vite\" \"npm run dev:server\"",
-    "db:pull": "wrangler d1 export phong_chi_tieu_db --remote --output=.wrangler/prod-export.sql && wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS memberships; DROP TABLE IF EXISTS user_sessions; DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS auth_throttle; DROP TABLE IF EXISTS settings; DROP TABLE IF EXISTS rooms; DROP TABLE IF EXISTS invites; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS schema_meta;\" && wrangler d1 execute phong_chi_tieu_db --local --file=.wrangler/prod-export.sql",
-    "db:migrate:local": "wrangler d1 execute phong_chi_tieu_db --local --file=./migrations/004_accounts.sql",
-    "db:schema:local": "wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS memberships; DROP TABLE IF EXISTS user_sessions; DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS auth_throttle; DROP TABLE IF EXISTS settings; DROP TABLE IF EXISTS rooms; DROP TABLE IF EXISTS invites; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS schema_meta;\" && wrangler d1 execute phong_chi_tieu_db --local --file=./schema.sql"
+    "db:pull": "wrangler d1 export phong_chi_tieu_db --remote --output=.wrangler/prod-export.sql && wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS join_requests; DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS memberships; DROP TABLE IF EXISTS user_sessions; DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS auth_throttle; DROP TABLE IF EXISTS settings; DROP TABLE IF EXISTS rooms; DROP TABLE IF EXISTS invites; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS schema_meta;\" && wrangler d1 execute phong_chi_tieu_db --local --file=.wrangler/prod-export.sql",
+    "db:migrate:local": "wrangler d1 execute phong_chi_tieu_db --local --file=./migrations/005_google_auth_and_join_approval.sql",
+    "db:schema:local": "wrangler d1 execute phong_chi_tieu_db --local --command=\"DROP TABLE IF EXISTS join_requests; DROP TABLE IF EXISTS member_shares; DROP TABLE IF EXISTS expenses; DROP TABLE IF EXISTS periods; DROP TABLE IF EXISTS members; DROP TABLE IF EXISTS memberships; DROP TABLE IF EXISTS user_sessions; DROP TABLE IF EXISTS users; DROP TABLE IF EXISTS auth_throttle; DROP TABLE IF EXISTS settings; DROP TABLE IF EXISTS rooms; DROP TABLE IF EXISTS invites; DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS schema_meta;\" && wrangler d1 execute phong_chi_tieu_db --local --file=./schema.sql",
+    "db:firestore:dry-run": "node scripts/migrate-d1-to-firestore.mjs",
+    "db:firestore:copy": "node scripts/migrate-d1-to-firestore.mjs --apply"
   },
   "dependencies": {
+    "@firebase/app": "0.13.2",
+    "@firebase/auth": "1.10.8",
     "canvas-confetti": "^1.9.3",
     "lucide-react": "^0.453.0",
     "react": "^18.3.1",

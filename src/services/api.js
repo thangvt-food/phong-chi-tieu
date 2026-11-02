@@ -1,9 +1,11 @@
-// API service: tài khoản + phòng qua Cloudflare Pages Functions.
+// API service: tài khoản + phòng qua Cloudflare Pages Functions and Firestore.
 // Ghi sổ CHỈ đi qua máy chủ; offline chỉ còn đọc bản cache của phòng đã từng tải.
+import { signOutGoogle } from './firebase';
 
 export const DEFAULT_ROOM = 'phong-2a';
 const AUTH_KEY = 'pct:auth';
 const LAST_ROOM_KEY = 'pct:lastRoom';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
 const dataKey = (roomId) => `pct:data:${roomId}`;
 
 export function roomIdFromUrl(search = (typeof window !== 'undefined' ? window.location.search : '')) {
@@ -88,7 +90,7 @@ async function request(path, { method = 'GET', body, roomId, auth = true } = {})
   const token = auth ? getAuth()?.token : null;
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  let url = path;
+  let url = API_BASE_URL ? `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}` : path;
   if (roomId) url += (url.includes('?') ? '&' : '?') + `p=${encodeURIComponent(roomId)}`;
 
   let res;
@@ -123,32 +125,14 @@ async function mutate(path, { roomId, body, method = 'POST' } = {}) {
 
 // ---- Tài khoản ----
 
-export async function authRegister({ username, password, displayName }) {
-  const { res, data, offline } = await request('/api/auth/register', {
+export async function authGoogle(idToken) {
+  const { res, data, offline } = await request('/api/auth/google', {
     method: 'POST',
     auth: false,
-    body: { username, password, display_name: displayName || '' },
+    body: { id_token: idToken },
   });
   if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
-  if (!res.ok) return { success: false, error: data.error || 'Không tạo được tài khoản.', field: data.field };
-  setAuth({ token: data.token, expires_at: data.expires_at, user: data.user });
-  return { success: true, user: data.user };
-}
-
-export async function authLogin({ username, password }) {
-  const { res, data, offline } = await request('/api/auth/login', {
-    method: 'POST',
-    auth: false,
-    body: { username, password },
-  });
-  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
-  if (!res.ok) {
-    return {
-      success: false,
-      error: data.error || 'Sai tên đăng nhập hoặc mật khẩu.',
-      locked: data.locked,
-    };
-  }
+  if (!res.ok) return { success: false, error: data.error || 'Không đăng nhập được bằng Google.' };
   setAuth({ token: data.token, expires_at: data.expires_at, user: data.user });
   return { success: true, user: data.user };
 }
@@ -156,6 +140,7 @@ export async function authLogin({ username, password }) {
 export async function authLogout() {
   await request('/api/auth/logout', { method: 'POST' });
   clearAuth();
+  await signOutGoogle();
 }
 
 export async function authMe() {
@@ -168,17 +153,11 @@ export async function authMe() {
   if (!res.ok) return { error: data.error || `Không tải được tài khoản (HTTP ${res.status}).` };
   const auth = getAuth();
   if (auth) setAuth({ ...auth, user: data.user });
-  return { user: data.user, rooms: data.rooms || [] };
-}
-
-export async function changePassword(oldPassword, newPassword) {
-  const { res, data, offline } = await request('/api/auth/change-password', {
-    method: 'POST',
-    body: { old_password: oldPassword, new_password: newPassword },
-  });
-  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
-  if (!res.ok) return { success: false, error: data.error || 'Không đổi được mật khẩu.' };
-  return { success: true };
+  return {
+    user: data.user,
+    rooms: data.rooms || [],
+    pending_requests: data.pending_requests || [],
+  };
 }
 
 export async function previewInvite(token) {
@@ -192,11 +171,8 @@ export async function claimInvite(token) {
   return mutate('/api/invites/claim', { body: { token } });
 }
 
-export async function recoverOwner({ roomId, pin, newPin, username, password, displayName }) {
+export async function recoverOwner({ roomId, pin, newPin }) {
   const body = { pin, new_pin: newPin };
-  if (username) body.username = username;
-  if (password) body.password = password;
-  if (displayName) body.display_name = displayName;
   const { res, data, offline } = await request('/api/rooms/recover-owner', {
     method: 'POST',
     roomId,
@@ -253,10 +229,11 @@ export function normalizeRoom(blob, roomId = DEFAULT_ROOM) {
     periods: Array.isArray(src.periods) ? src.periods : [],
     expenses: Array.isArray(src.expenses) ? src.expenses : [],
     member_shares: Array.isArray(src.member_shares) ? src.member_shares : [],
+    activity_logs: Array.isArray(src.activity_logs) ? src.activity_logs : [],
   };
 }
 
-// source: 'd1' | 'offline' | 'offline_empty' | 'need_auth' | 'forbidden' | 'need_room' | 'error'
+// source: 'firestore' | 'offline' | 'offline_empty' | 'need_auth' | 'forbidden' | 'need_room' | 'error'
 export async function fetchRoomData(roomId) {
   const { res, data, offline } = await request('/api/data', { roomId });
   if (offline) {
@@ -290,7 +267,7 @@ export async function fetchRoomData(roomId) {
     };
   }
   writeCachedRoom(roomId, data);
-  return { ...normalizeRoom(data, roomId), source: 'd1' };
+  return { ...normalizeRoom(data, roomId), source: 'firestore' };
 }
 
 // ---- Ghi sổ (cần tài khoản + quyền; server là nguồn sự thật) ----
@@ -301,6 +278,17 @@ export async function createRoom({ name, pin, ownerName }) {
   });
   if (!result.success) return result;
   return { success: true, room_id: result.room?.room_id, room: result.room };
+}
+
+export async function searchRooms(query = '') {
+  const { res, data, offline } = await request(`/api/rooms/search?q=${encodeURIComponent(query)}`);
+  if (offline) return { success: false, error: 'Không kết nối được máy chủ.' };
+  if (!res.ok) return { success: false, error: data.error || 'Lỗi tìm kiếm phòng.' };
+  return { success: true, rooms: data.rooms || [] };
+}
+
+export async function requestJoinRoom(roomId) {
+  return mutate('/api/rooms/request-join', { body: { room_id: roomId } });
 }
 
 export async function updateSettings(roomId, settings) {
@@ -379,6 +367,20 @@ export async function createInvite(roomId, memberId, { ttlMin, role = 'member' }
   const result = await mutate('/api/admin/invites', { roomId, body });
   if (!result.success) return result;
   return { ...result, linkToken: result.token };
+}
+
+export async function fetchJoinRequests(roomId) {
+  const { res, data, offline } = await request('/api/admin/join-requests', { roomId });
+  if (offline) return { success: false, error: 'Không gọi được máy chủ (offline?).' };
+  if (!res.ok) return { success: false, error: data.error || `Máy chủ trả ${res.status}.` };
+  return { success: true, requests: data.requests || [] };
+}
+
+export async function reviewJoinRequest(roomId, requestId, decision) {
+  return mutate(
+    `/api/admin/join-requests/${encodeURIComponent(requestId)}/${decision}`,
+    { roomId }
+  );
 }
 
 export async function transferOwner(roomId, memberId) {

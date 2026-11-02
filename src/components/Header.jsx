@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   Home,
   Settings,
+  History,
   Plus,
   ChevronDown,
   DoorOpen,
@@ -25,7 +26,8 @@ export default function Header({
   onOpenAddRoom,
   onOpenAddExpense,
   onOpenSettings,
-  onOpenChangePassword,
+  onOpenLogs,
+  onManageGoogleAccount,
   onLogout,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -85,13 +87,16 @@ export default function Header({
                       {user?.display_name || user?.username}
                     </p>
                     <p className="text-[10px] text-slate-500 font-mono truncate">
-                      @{user?.username}
+                      {user?.email || (user?.username ? `@${user.username}` : 'Tài khoản Google')}
                     </p>
                   </div>
                 </div>
 
                 <p className="px-2.5 py-1.5 text-[10px] font-semibold text-slate-500 uppercase tracking-wider border-t border-slate-100">
-                  Phòng của bạn
+                  Phòng của bạn ({rooms.length})
+                </p>
+                <p className="px-2.5 pb-1.5 text-[10px] text-slate-500">
+                  Một tài khoản dùng được nhiều phòng. Mỗi phòng có sổ và quyền riêng; chọn để chuyển.
                 </p>
                 {rooms.length === 0 && (
                   <p className="px-2.5 py-1.5 text-[11px] text-slate-400">
@@ -168,12 +173,12 @@ export default function Header({
                   <button
                     onClick={() => {
                       close();
-                      onOpenChangePassword();
+                      onManageGoogleAccount();
                     }}
                     className="w-full flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors"
                   >
                     <KeyRound className="w-3.5 h-3.5" />
-                    Đổi mật khẩu
+                    Bảo mật tài khoản Google
                   </button>
                   <button
                     onClick={() => {
@@ -204,6 +209,14 @@ export default function Header({
             </button>
           )}
 
+          <button
+            onClick={onOpenLogs}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 transition-colors text-xs font-semibold"
+            title="Lịch sử hoạt động"
+          >
+            <History className="w-4 h-4 stroke-[2]" />
+            <span className="hidden sm:inline">Lịch sử</span>
+          </button>
           {canManage ? (
             <button
               onClick={onOpenSettings}
