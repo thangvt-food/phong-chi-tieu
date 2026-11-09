@@ -1,0 +1,26 @@
+slug: phong-chi-tieu
+name: Chi tiêu phòng trọ
+tagline: Chia tiền phòng trọ và sinh VietQR từng thành viên
+url: https://github.com/thangvt-food/phong-chi-tieu
+status: building
+visibility: private
+description: Web quản lý chi phí phòng trọ, tự chia đều cho thành viên và sinh mã VietQR đúng số tiền; dùng Google login và Cloudflare/Firebase.
+tags:
+  - tài-chính
+  - phòng-trọ
+  - vietqr
+category: finance
+tech:
+  - react
+  - vite
+  - firebase
+  - cloudflare
+  - tailwindcss
+hosting: cloudflare-pages
+updated: '2026-11-02'
+version: 1.0.0
+icon: 🏠
+auth: login
+links:
+  repo: https://github.com/thangvt-food/phong-chi-tieu
+notes: Repo public nhưng chưa thấy URL deploy trong homepage; cấu hình Firebase/Cloudflare trong repo.
